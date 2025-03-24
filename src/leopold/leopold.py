@@ -13,6 +13,7 @@ import jax.numpy as jnp
 
 # Flax
 import flax.linen as nn
+from flax import nnx
 
 # Cuequivariance
 import cuequivariance as cue
@@ -28,7 +29,7 @@ from cuequivariance import Irreps, EquivariantTensorProduct
 # ==== OBJECTS ==== #
 
 
-class FullyConnectedTensorProduct(nn.Module):
+class FullyConnectedTensorProduct(nnx.Module):
     """Flax module of an equivariant Fully-Connected Tensor Product."""
 
     descriptor: EquivariantTensorProduct
@@ -43,11 +44,10 @@ class FullyConnectedTensorProduct(nn.Module):
             irreps_in1, irreps_in2, irreps_out
         )
 
-    def __call__(self, x1: IrrepsArray, x2: IrrepsArray) -> IrrepsArray:
-        x1 = cuex.as_irreps_array(x1)
-        x2 = cuex.as_irreps_array(x2)
+        self.weights = nnx.Param(jnp.ones(self.descriptor.d.operands[0].size))
 
-        return cuex.equivariant_tensor_product(self.descriptor, x1, x2)
+    def __call__(self, x1: IrrepsArray, x2: IrrepsArray) -> IrrepsArray:
+        return cuex.equivariant_tensor_product(self.descriptor, self.weights, x1, x2)
 
 
 class Leopold(nn.Module):
@@ -79,6 +79,12 @@ class Leopold(nn.Module):
 
 # ==== TEST ==== #
 if __name__ == "__main__":
-    in1 = Irreps(cue.O3, "10x0e + 3x1e")
+    irr1 = Irreps("O3", "4x0e + 2x1e")
+    irr2 = Irreps("O3", "4x0e + 3x1e")
 
-    print(in1)
+    x = cuex.IrrepsArray(irr1, jnp.ones(10), cue.ir_mul)
+    y = cuex.IrrepsArray(irr2, jnp.ones(13), cue.ir_mul)
+
+    model = FullyConnectedTensorProduct(Irreps("O3", "5x0e"), irr1, irr2)
+
+    print(model)
