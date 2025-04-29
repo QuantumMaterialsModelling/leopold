@@ -12,10 +12,9 @@ contact:  luca.leoni12@unibo.it
 import numpy as np
 
 # H5
-import h5py
+from h5py import File, Group, Dataset
 
 # Types
-from h5py import File, Group, Dataset
 from enum import Enum, unique
 from ase import Atoms
 

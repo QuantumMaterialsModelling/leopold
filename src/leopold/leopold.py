@@ -10,81 +10,109 @@ contact:  luca.leoni12@unibo.it
 
 # Math
 import jax.numpy as jnp
+import jax.random as jrn
+
+from jax import Array
 
 # Flax
 import flax.linen as nn
-from flax import nnx
 
 # Cuequivariance
 import cuequivariance as cue
 import cuequivariance_jax as cuex
 
 # Types
-from typing import Dict, Union, Optional
-from dataclasses import field
-from jax import Array
-from cuequivariance_jax import IrrepsArray
-from cuequivariance import Irreps, EquivariantTensorProduct
+from cuequivariance_jax import RepArray
+from cuequivariance import Irreps
 
 # ==== OBJECTS ==== #
 
 
-class FullyConnectedTensorProduct(nnx.Module):
-    """Flax module of an equivariant Fully-Connected Tensor Product."""
+class FullyConnectedTensorProduct(nn.Module):
+    """Cuequivariance implementation of a fully connected tensor product module
 
-    descriptor: EquivariantTensorProduct
+    Attributes:
+        irr_out: Irreps of output
+    """
 
-    def __init__(
-        self,
-        irreps_out: Irreps,
-        irreps_in1: Irreps,
-        irreps_in2: Irreps,
-    ):
-        self.descriptor = cue.descriptors.fully_connected_tensor_product(
-            irreps_in1, irreps_in2, irreps_out
+    irr_out: Irreps
+
+    @nn.compact
+    def __call__(self, x1: RepArray, x2: RepArray) -> RepArray:
+        e = cue.descriptors.fully_connected_tensor_product(
+            x1.irreps, x2.irreps, self.irr_out
         )
+        w = self.param("weights", lambda x: cuex.randn(x, e.operands[0]))
 
-        self.weights = nnx.Param(jnp.ones(self.descriptor.d.operands[0].size))
-
-    def __call__(self, x1: IrrepsArray, x2: IrrepsArray) -> IrrepsArray:
-        return cuex.equivariant_tensor_product(self.descriptor, self.weights, x1, x2)
+        return cuex.equivariant_polynomial(e, [w, x1, x2])  # pyright: ignore
 
 
-class Leopold(nn.Module):
-    graph_net_steps: int
-    use_sc: bool
-    nonlinearities: Union[str, Dict[str, str]]
-    n_elements: int
+class Linear(nn.Module):
+    """Cuequivariance implementation of a linear layer
 
-    hidden_irreps: str
-    sh_irreps: str
+    Attributes:
+        irr_out: Irreps of output
+    """
 
-    num_basis: int = 8
-    r_max: float = 4.0
+    irr_out: Irreps
 
-    radial_net_nonlinearity: str = "raw_swish"
-    radial_net_n_hidden: int = 64
-    radial_net_n_layers: int = 2
+    @nn.compact
+    def __call__(self, x: RepArray) -> RepArray:
+        e = cue.descriptors.linear(x.irreps, self.irr_out)
 
-    shift: float = 0.0
-    scale: float = 1.0
-    shift_occ: Optional[Array] = field(default=None)
-    scale_occ: Optional[Array] = field(default=None)
-    n_neighbors: float = 1.0
-    scalar_mlp_std: float = 4.0
+        # TODO: This can be enhanced with a better initialization dependent on the dim
+        #       so that the std of the normal is 1 / sqrt(dim), but dim is different
+        #       for weights acting on scalars and the one acting on other parts.
+        #       Thus, the implementation would need to do something like what is done
+        #       inside line 72 of linear.py in e3nn
+        w = self.param("weights", lambda key: cuex.randn(key, e.operands[0]))
 
-    learn_energy: bool = True
-    occup_clipping: bool = False
+        return cuex.equivariant_polynomial(e, [w, x])  # pyright: ignore
+
+
+class BesselEmbedding(nn.Module):
+    count: int
+    inner_cutoff: float
+    outer_cutoff: float
+
+    @nn.compact
+    def __call__(self, r: Array) -> Array:
+        # Define frequencies of Bessel functions
+        w = self.param("frequences", lambda _: jnp.arange(1, self.count + 1) * jnp.pi)
+
+        # Compute bessel functions
+        b = 2 * jnp.sin(w * r / self.outer_cutoff) / (r * self.outer_cutoff)
+
+        # Compute envelop to make them smooth
+        r2, rc, ro = r * r, self.outer_cutoff**2, self.inner_cutoff**2
+
+        envelop = jnp.where(
+            r < self.outer_cutoff,
+            (rc - r2) ** 2 * (rc + 2 * r2 - 3 * ro) / (rc - ro) ** 3,
+            0,
+        )
+        envelop = jnp.where(r < self.inner_cutoff, 1, envelop)
+
+        # Final multiplication
+        return jnp.where(r > 1e-5, b, 0) * envelop
 
 
 # ==== TEST ==== #
 if __name__ == "__main__":
+    key = jrn.PRNGKey(0)
+
     irr1 = Irreps("O3", "4x0e + 2x1e")
     irr2 = Irreps("O3", "4x0e + 3x1e")
 
-    x = cuex.IrrepsArray(irr1, jnp.ones(10), cue.ir_mul)
-    y = cuex.IrrepsArray(irr2, jnp.ones(13), cue.ir_mul)
+    x = cuex.RepArray(irr1, jnp.ones(10), cue.ir_mul)
+    y = cuex.RepArray(irr2, jnp.ones(13), cue.ir_mul)
 
-    model = FullyConnectedTensorProduct(Irreps("O3", "5x0e"), irr1, irr2)
+    model = BesselEmbedding(5, 0.5, 1)
 
-    print(model)
+    x = jrn.normal(key, (10,))
+    print(x)
+
+    param = model.init(key, x)
+    print(param)
+
+    print(model.apply(param, x))
