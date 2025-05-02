@@ -12,7 +12,6 @@ contact:  luca.leoni12@unibo.it
 import warnings
 
 # ASE
-from warnings import WarningMessage
 from ase import Atoms
 from ase.io import read
 
@@ -44,15 +43,11 @@ vector_labels = {
 # ==== FUNCTIONS ==== #
 
 
-def get_graphs_from_atoms(atoms: list[Atoms]):
+def get_graphs_from_atoms(atoms: list[Atoms], pol_character: int) -> list[GraphsTuple]:
     pass
 
 
-def get_labels_from_atoms(file: str, pol_character: int) -> dict[str, Array]:
-    atoms = read(file, ":", "extxyz")
-    if not isinstance(atoms, list):
-        atoms = [atoms]
-
+def get_labels_from_atoms(atoms: list[Atoms], pol_character: int) -> dict[str, Array]:
     # First construct the data dictionary
     res = {key: [] for key, _ in (scalar_labels | vector_labels).items()}
 
