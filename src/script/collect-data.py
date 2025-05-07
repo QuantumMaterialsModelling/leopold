@@ -9,7 +9,6 @@ contact:  luca.leoni12@unibo.it
 # ==== DEPENDENCIES ==== #
 
 # Math
-from os.path import isdir
 import numpy as np
 
 # H5
@@ -22,7 +21,6 @@ from ase.io import write
 
 # OS
 import os
-from os import PathLike
 
 # Parser
 from argparse import ArgumentParser, Namespace
