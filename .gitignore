@@ -2,8 +2,8 @@
 **/.pytype/*
 
 src/__pycache__/*
-src/old/__pycache__/*
 src/leopold/__pycache__/*
+src/old/__pycache__/*
 
 data.xyz
 vaspout.h5
