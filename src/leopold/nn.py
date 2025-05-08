@@ -10,7 +10,6 @@ contact:  luca.leoni12@unibo.it
 
 # Math
 import jax.numpy as jnp
-import jax.random as jrn
 
 from jax import Array
 
@@ -95,24 +94,3 @@ class BesselEmbedding(nn.Module):
 
         # Final multiplication
         return jnp.where(r > 1e-5, b, 0) * envelop
-
-
-# ==== TEST ==== #
-if __name__ == "__main__":
-    key = jrn.PRNGKey(0)
-
-    irr1 = Irreps("O3", "4x0e + 2x1e")
-    irr2 = Irreps("O3", "4x0e + 3x1e")
-
-    x = cuex.RepArray(irr1, jnp.ones(10), cue.ir_mul)
-    y = cuex.RepArray(irr2, jnp.ones(13), cue.ir_mul)
-
-    model = BesselEmbedding(5, 0.5, 1)
-
-    x = jrn.normal(key, (10,))
-    print(x)
-
-    param = model.init(key, x)
-    print(param)
-
-    print(model.apply(param, x))
