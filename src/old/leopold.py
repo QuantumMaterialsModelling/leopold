@@ -10,7 +10,7 @@ import flax.linen as nn
 
 # Jax
 import jax.numpy as jnp
-from jax import tree_util, tree_map
+from jax import tree_util
 from jax.nn import sigmoid
 
 # Jraph
@@ -32,7 +32,7 @@ from dataclasses import field
 
 # Helps
 get_nonlinearity_by_name = util.get_nonlinearity_by_name
-tree_map = partial(tree_map, is_leaf=lambda x: isinstance(x, IrrepsArray))
+tree_map = partial(tree_util.tree_map, is_leaf=lambda x: isinstance(x, IrrepsArray))
 
 # ---- MODEL
 
@@ -115,8 +115,9 @@ class NequIPEnergyModel(nn.Module):
 
         # edge embedding
         dR = graph.edges
-        scalar_dr_edge = space.distance(dR)
+        scalar_dr_edge = space.distance(dR)[0]
         edge_sh = spherical_harmonics(self.sh_irreps, dR, normalize=True)
+        print(edge_sh)
 
         embedded_dr_edge = util.BesselEmbedding(
             count=self.num_basis, inner_cutoff=r_max - 0.5, outer_cutoff=r_max
@@ -124,6 +125,8 @@ class NequIPEnergyModel(nn.Module):
 
         # embedding layer
         h_node = nequip.Linear(irreps_out=Irreps(hidden_irreps))(node_attrs)
+
+        return h_node
 
         # convolutions
         for _ in range(self.graph_net_steps):

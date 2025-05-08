@@ -79,8 +79,12 @@ class BesselEmbedding(nn.Module):
         # Define frequencies of Bessel functions
         w = self.param("frequences", lambda _: jnp.arange(1, self.count + 1) * jnp.pi)
 
+        # Broadcast (N,) to (N, 1)
+        r = r[:, jnp.newaxis]
+
         # Compute bessel functions
-        b = 2 * jnp.sin(w * r / self.outer_cutoff) / (r * self.outer_cutoff)
+        b = w[jnp.newaxis, :] * r
+        b = 2 * jnp.sin(b / self.outer_cutoff) / (r * self.outer_cutoff)
 
         # Compute envelop to make them smooth
         r2, rc, ro = r * r, self.outer_cutoff**2, self.inner_cutoff**2

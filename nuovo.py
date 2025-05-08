@@ -8,27 +8,32 @@ contact:  luca.leoni12@unibo.it
 
 # ==== DEPENDENCIES ==== #
 
-# LEOPOLD
+# Functional
 from functools import partial
+
+# LEOPOLD
 import leopold.nn as nn
 from leopold.dataset import leopold_load_datasets
+from old.leopold import NequIPEnergyModel
 
 # Math
 import jax.numpy as jnp
+import jax.random as jrn
 from jax import Array, vmap
+
+# NN
+from flax import linen
 
 # JAX-MD
 from jax_md import space, partition
 
 # CUEQUI
-import cuequivariance as cuex
-import cuequivariance_jax as cujx
-
-# ASE
-from ase.build import bulk
+import cuequivariance as cue
+import cuequivariance_jax as cuex
 
 # Types
-from argparse import ArgumentParser, Namespace
+from jraph import GraphsTuple
+from cuequivariance import Irreps
 
 # ==== FUNCTIONS ==== #
 
@@ -59,21 +64,42 @@ def get_graph_constructor(pos: Array, box: Array, r_cutoff: float):
     return get_graph
 
 
-# ==== PARSER ==== #
-
-
-def parse_args() -> Namespace:
-    parser = ArgumentParser("nuovo")
-
-    return parser.parse_args()
-
-
 # ==== MAIN ==== #
 
 
-def main():
-    args = parse_args()
+class Leopold(linen.Module):
+    r_cutof: float
+    n_basis: int
+    n_harmo: int
+    n_elems: int
 
+    hidden_irr: Irreps
+
+    @linen.compact
+    def __call__(self, graph: GraphsTuple):
+        # Get edges
+        dR = jnp.asarray(graph.edges)
+        R = jnp.linalg.norm(dR, axis=-1)
+
+        # Transform edges in RepArray
+        dR = cuex.RepArray(cue.Irreps("O3", "1e"), dR, cue.mul_ir)
+
+        # Embed edges
+        dR = cuex.spherical_harmonics([i for i in range(self.n_harmo + 1)], dR)
+        R = nn.BesselEmbedding(self.n_basis, self.r_cutof - 0.5, self.r_cutof)(R[0])
+
+        print(dR)
+
+        # Transform nodes in Rep Array
+        nodes = jnp.asarray(graph.nodes)
+        nodes = cuex.RepArray(cue.Irreps("O3", f"{self.n_elems}x0e"), nodes, cue.mul_ir)
+
+        nodes = nn.Linear(self.hidden_irr)(nodes)
+
+        return nodes
+
+
+def main():
     # Get data loader
     data = leopold_load_datasets({"dataset": {"test": "test.xyz"}}, batch_size=1)
     data = data["test"]
@@ -81,13 +107,23 @@ def main():
     # take first entry
     (pos, ele, box), _ = data[0]
 
-    # Construct metric
+    # Construct graph
     get_graph = get_graph_constructor(pos[0], box[0], 3.5)
 
     graph = vmap(get_graph)(pos, ele, box)
 
-    r = jnp.linalg.norm(graph.edges, axis=-1)
-    print(r)
+    # Construct model
+    hidden_irr = cue.Irreps("O3", "42x0e + 8x1e")
+    model = Leopold(4, 8, 1, 3, hidden_irr)
+
+    old_m = NequIPEnergyModel(
+        8, True, {"e": "raw_swish", "o": "tanh"}, 3, "42x0e + 8x1e", "1x0e + 1x1e"
+    )
+
+    param = model.init(jrn.PRNGKey(0), graph)
+    opara = old_m.init(jrn.PRNGKey(0), graph)
+
+    res = model.apply(param, graph)
 
 
 if __name__ == "__main__":
