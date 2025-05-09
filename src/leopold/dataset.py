@@ -198,12 +198,16 @@ class LeopoldDataLoader:
 
 
 # TODO: in future make it possible to read also hdf5 dataset
-def read(path: str) -> list[Atoms]:
+def read(
+    path: str, scalar_labels: dict[str, str], vector_labels: dict[str, str]
+) -> list[Atoms]:
     """Custom data reader
 
     Read raw data from file and return a list of ASE Atoms object containing everithing.
     The output Atoms have the energy and forces put in the info and arrays variable respectively,
-    so that is compatible wiht the rest of the code standards.
+    so that is compatible wiht the rest of the code standards. Also, if a single vector is
+    given for magmoms and charges of dimension (N_atoms,) then it is rearranged to be of size
+    (N_atoms, 1) compatible with other methods.
 
     Args:
         path: path to the raw data file
@@ -217,11 +221,17 @@ def read(path: str) -> list[Atoms]:
 
     # Rearrange some entries
     for atoms in data:
-        try:
+        if scalar_labels["energy"] == "energy":
             atoms.info["energy"] = atoms.get_potential_energy()
+
+        if vector_labels["forces"] == "forces":
             atoms.arrays["forces"] = atoms.get_forces()
-        except RuntimeError:
-            pass
+
+        magmom_label = vector_labels["magmoms"]
+        charge_label = vector_labels["charges"]
+        if atoms.arrays[magmom_label].ndim == 1:
+            atoms.arrays[magmom_label] = atoms.arrays[magmom_label][:, np.newaxis]
+            atoms.arrays[charge_label] = atoms.arrays[charge_label][:, np.newaxis]
 
     return data
 
@@ -397,15 +407,6 @@ def leopold_load_datasets(
     else:
         conf = conf_file.copy()
 
-    # Get dataset files path and read on CPU
-    raw_data: dict[str, list[Atoms]] = {}
-    for name in conf["dataset"].keys():
-        # Avoid try to read the leables as datasets
-        if name == "labels":
-            continue
-
-        raw_data[name] = read(conf["dataset"][name])
-
     # Modify labels as user requested
     scalar_labels = DEFAULT_SCALAR_LABELS.copy()
     vector_labels = DEFAULT_VECTOR_LABELS.copy()
@@ -415,6 +416,15 @@ def leopold_load_datasets(
             scalar_labels.update(conf["dataset"]["labels"].get("scalar"))
         if conf["dataset"]["labels"].get("vector") is not None:
             vector_labels.update(conf["dataset"]["labels"].get("vector"))
+
+    # Get dataset files path and read on CPU
+    raw_data: dict[str, list[Atoms]] = {}
+    for name in conf["dataset"].keys():
+        # Avoid try to read the leables as datasets
+        if name == "labels":
+            continue
+
+        raw_data[name] = read(conf["dataset"][name], scalar_labels, vector_labels)
 
     # Collect info on datasets
     if share_info:

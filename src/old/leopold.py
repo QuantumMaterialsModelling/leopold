@@ -117,7 +117,6 @@ class NequIPEnergyModel(nn.Module):
         dR = graph.edges
         scalar_dr_edge = space.distance(dR)[0]
         edge_sh = spherical_harmonics(self.sh_irreps, dR, normalize=True)
-        print(edge_sh)
 
         embedded_dr_edge = util.BesselEmbedding(
             count=self.num_basis, inner_cutoff=r_max - 0.5, outer_cutoff=r_max
@@ -125,8 +124,6 @@ class NequIPEnergyModel(nn.Module):
 
         # embedding layer
         h_node = nequip.Linear(irreps_out=Irreps(hidden_irreps))(node_attrs)
-
-        return h_node
 
         # convolutions
         for _ in range(self.graph_net_steps):
@@ -141,6 +138,8 @@ class NequIPEnergyModel(nn.Module):
                 n_neighbors=self.n_neighbors,
                 scalar_mlp_std=self.scalar_mlp_std,
             )(h_node, node_attrs, edge_sh, edge_src, edge_dst, embedded_dr_edge)
+
+        return h_node
 
         # output block, two Linears that decay dimensions from h to h//2 to 1
         for mul, ir in h_node.irreps:
