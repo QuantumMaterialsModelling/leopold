@@ -193,6 +193,12 @@ class LeopoldDataLoader:
         beg = idx * self.batch_size
         return self.__data_constructor(self.data[beg : beg + self.batch_size])  # pyright: ignore
 
+    def __len__(self) -> int:
+        if isinstance(self.data[0], LeopoldData):
+            return sum([d.config.box.shape[0] for d in self.data])  # pyright: ignore
+
+        return len(self.data)
+
 
 # ==== FUNCTIONS ==== #
 
