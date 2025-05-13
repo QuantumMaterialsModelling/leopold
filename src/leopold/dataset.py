@@ -287,7 +287,7 @@ def leopold_data_constructor(
             ele = atoms.get_atomic_numbers()
 
             # Polaron state
-            pol = np.abs(labels["magmoms"])
+            pol = np.abs(labels["magmoms"][-1])
             pol = np.argsort(pol, axis=0)[-np.round(pol.sum()).astype(np.int32) :]
 
             pol_state = np.zeros((len(atoms), 1))
@@ -296,6 +296,7 @@ def leopold_data_constructor(
             # Create ones-hot encoding
             ones_hot = (ele[:, np.newaxis] == info.species).astype(np.int32)
             ones_hot = np.concatenate((ones_hot, pol_state), axis=1)
+            ones_hot = np.pad(ones_hot, ((0, atom_padding), (0, 0)))
 
             confs["positions"].append(pos)
             confs["ones_hot"].append(ones_hot)
