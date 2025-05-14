@@ -14,6 +14,12 @@ from random import shuffle as rng_shuffle
 # MATH
 import numpy as np
 
+# HDF5
+from h5py import Group
+
+# CUEQUIVARIANCE
+from cuequivariance_jax import RepArray
+
 # ASE
 from ase import Atoms
 from ase.io import read as ase_read
@@ -25,8 +31,10 @@ from jax import Array
 # YAML
 import yaml
 
+# DATACLASS
+from dataclasses import dataclass, asdict
+
 # Typing
-from dataclasses import dataclass
 from typing import Callable, NamedTuple
 
 # ==== DATA DEFAULTS ==== #
@@ -158,7 +166,7 @@ class LeopoldDataLoader:
 
         return self
 
-    def __next__(self):
+    def __next__(self) -> LeopoldData:
         # See if we hit the end
         if self.idx >= self.nbatches:
             raise StopIteration()
@@ -169,7 +177,7 @@ class LeopoldDataLoader:
 
         # If Configurations are already loaded send the right one
         if isinstance(self.data[0], LeopoldData):
-            return self.data[idx]
+            return self.data[idx]  # pyright: ignore
 
         # Construct the data and return
         beg = idx * self.batch_size
@@ -452,6 +460,77 @@ def leopold_load_datasets(
         datasets[key] = LeopoldDataLoader(value, f, info, batch_size, preload, shuffle)
 
     return datasets
+
+
+# ==== HDF5 ==== #
+
+
+def save_dictionary_to_hdf5(group: Group, data: dict, compression: int = 9) -> None:
+    for key, value in data.items():
+        if isinstance(value, dict):
+            save_dictionary_to_hdf5(group.require_group(key), value)
+        else:
+            # Handle RepArray
+            if isinstance(value, RepArray):
+                arr = np.asarray(value.array)
+
+                d = group.require_dataset(
+                    key, arr.shape, arr.dtype, compression=compression
+                )
+
+                # Save irreps as attributes
+                d.attrs["Irreps"] = str(value.irreps)
+                d[:] = arr
+            else:
+                # Handle scalars
+                if np.isscalar(value):
+                    value = np.asarray([value])
+                else:
+                    value = np.asarray(value)
+
+                group.require_dataset(
+                    key, value.shape, value.dtype, compression=compression
+                )[:] = value
+
+
+# TODO: modify the data loader to avoid using the data constructor since it's an
+#       additional step, you can simply pass the labels that you want to load, makes
+#       much more sens. Also, allow raw input to be an hdf5 group and create
+#       dataloader out of it.
+
+
+def dataloader_to_hdf5(
+    group: Group,
+    loader: LeopoldDataLoader,
+    save_data: bool = True,
+    compression: int = 9,
+) -> None:
+    # Save info on the dataset
+    g = group.require_group("info")
+
+    prova = asdict(loader.info)
+    save_dictionary_to_hdf5(g, prova, compression)
+
+    # If requested save the whole dataset
+    if save_data:
+        # Gather config and labels data to GPU
+        confis = {key: [] for key in loader[0].config._asdict().keys()}
+        labels = {key: [] for key in loader[0].labels._asdict().keys()}
+        for batch in loader:
+            for key, value in batch.config._asdict().items():
+                confis[key].extend(value)
+
+            for key, value in batch.labels._asdict().items():
+                if value is None:
+                    continue
+                labels[key].extend(value)
+
+        confis = {key: np.asarray(value) for key, value in confis.items()}
+        labels = {key: np.asarray(value) for key, value in labels.items()}
+
+        # Save it on HDF5
+        save_dictionary_to_hdf5(group.require_group("configurations"), confis)
+        save_dictionary_to_hdf5(group.require_group("labels"), labels)
 
 
 # ==== TEST ==== #

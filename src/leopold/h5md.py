@@ -11,15 +11,20 @@ contact:  luca.leoni12@unibo.it
 # Math
 import numpy as np
 
+# ASE
+from ase import Atoms
+
+# Cuequivariance
+from cuequivariance_jax import RepArray
+
 # H5
 from h5py import File, Group, Dataset
 
 # Types
 from enum import Enum, unique
-from ase import Atoms
 
 # Version
-from __init__ import __version__
+from .__init__ import __version__
 
 # ==== OBJECTS ==== #
 

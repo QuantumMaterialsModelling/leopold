@@ -33,6 +33,9 @@ import cuequivariance_jax as cuex
 
 from cuequivariance_jax import RepArray
 
+# Dataclass
+from dataclasses import asdict
+
 # Types
 from jraph import GraphsTuple
 from cuequivariance import Irreps
@@ -93,18 +96,49 @@ def save_params_to_hdf5(group: Group, params: FrozenDict | dict, compression: in
                 d.attrs["Irreps"] = str(value.irreps)
                 d[:] = data
             else:
-                data = np.asarray(value)
+                # Handle scalars
+                if np.isscalar(value):
+                    data = np.asarray([value])
+                else:
+                    data = np.asarray(value)
 
-                d = group.require_dataset(
+                group.require_dataset(
                     key, data.shape, data.dtype, compression=compression
-                )
-                d[:] = data
+                )[:] = data
 
 
-def save_data_to_hdf5(group: Group, data: LeopoldDataLoader, compression: int = 9):
-    data.info
-    group.require_group
-    pass
+def save_data_to_hdf5(
+    group: Group,
+    loader: LeopoldDataLoader,
+    save_data: bool = True,
+    compression: int = 9,
+):
+    # Save info on the dataset
+    g = group.require_group("info")
+
+    prova = asdict(loader.info)
+    save_params_to_hdf5(g, prova, compression)
+
+    # If requested save the whole dataset
+    if save_data:
+        # Gather config and labels data to GPU
+        confis = {key: [] for key in loader[0].config._asdict().keys()}
+        labels = {key: [] for key in loader[0].labels._asdict().keys()}
+        for batch in loader:
+            for key, value in batch.config._asdict().items():
+                confis[key].extend(value)
+
+            for key, value in batch.labels._asdict().items():
+                if value is None:
+                    continue
+                labels[key].extend(value)
+
+        confis = {key: np.asarray(value) for key, value in confis.items()}
+        labels = {key: np.asarray(value) for key, value in labels.items()}
+
+        # Save it on HDF5
+        save_params_to_hdf5(group.require_group("configurations"), confis)
+        save_params_to_hdf5(group.require_group("labels"), labels)
 
 
 # ==== MAIN ==== #
@@ -132,7 +166,8 @@ def main():
 
     # Save parameters to HDF5
     with File("test.h5", "a") as f:
-        save_params_to_hdf5(f, param)
+        save_params_to_hdf5(f.require_group("models"), param)
+        save_data_to_hdf5(f.require_group("datasets"), data)
 
 
 if __name__ == "__main__":
