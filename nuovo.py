@@ -13,7 +13,11 @@ from functools import partial
 
 # LEOPOLD
 import leopold.nn as nn
-from leopold.dataset import leopold_load_datasets, LeopoldDataLoader
+from leopold.dataset import (
+    leopold_load_datasets,
+    LeopoldDataLoader,
+    leopold_dataloader_to_hdf5,
+)
 
 # HDF5
 from h5py import File, Group
@@ -167,7 +171,7 @@ def main():
     # Save parameters to HDF5
     with File("test.h5", "a") as f:
         save_params_to_hdf5(f.require_group("models"), param)
-        save_data_to_hdf5(f.require_group("datasets"), data)
+        leopold_dataloader_to_hdf5(f.require_group("datasets"), data)
 
 
 if __name__ == "__main__":

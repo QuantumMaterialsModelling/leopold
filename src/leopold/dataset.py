@@ -15,7 +15,7 @@ from random import shuffle as rng_shuffle
 import numpy as np
 
 # HDF5
-from h5py import Group
+from h5py import Group, Dataset
 
 # CUEQUIVARIANCE
 from cuequivariance_jax import RepArray
@@ -118,28 +118,47 @@ class LeopoldDataLoader:
 
     Attributes:
         info: general information on the dataset
-        data: list of ASE atoms containing the raw data or list of GPU loaded data if data is preloaded
+        data: list LeopoldData object loaded on the device
         nbatches: number of batches present
         batch_size: size of every batch
     """
 
     info: LeopoldDataInfo
-    data: list[LeopoldData] | list[Atoms]
+    data: list[LeopoldData]
 
     nbatches: int
     batch_size: int = 1
 
     def __init__(
         self,
-        raw_data: list[Atoms],
-        data_constructor: Callable[[list[Atoms]], LeopoldData],
-        info: LeopoldDataInfo,
+        raw_data: list[Atoms] | Group,
+        scalar_labels: dict[str, str] = DEFAULT_SCALAR_LABELS,
+        vector_labels: dict[str, str] = DEFAULT_VECTOR_LABELS,
+        info: LeopoldDataInfo | None = None,
         batch_size: int = 1,
-        preload: bool = True,
         shuffle: bool = True,
     ) -> None:
-        self.__data_constructor = data_constructor
-        self.info = info
+        # If an HDF5 group is given everithing is easy
+        if isinstance(raw_data, Group):
+            # Collect metadata
+            self.info = leopold_info_from_hdf5(raw_data)
+            self.nbatches = raw_data.attrs.get("nbatches", 0)
+            self.batch_size = raw_data.attrs.get("batch_size", 0)
+
+            if self.nbatches == 0 or self.batch_size == 0:
+                raise KeyError(f"group {raw_data.name} is not a Leopold dataset")
+
+            # Collect data
+            self.data = leopold_data_from_hdf5(raw_data)
+
+            # Finish here
+            return
+
+        # Load data from list of ASE atoms
+        self.info = leopold_data_info(raw_data, vector_labels) if info is None else info
+
+        # Get the data constructor function
+        f = leopold_data_constructor(self.info, scalar_labels, vector_labels)
 
         # Compute the number of batches
         self.batch_size = batch_size
@@ -148,18 +167,15 @@ class LeopoldDataLoader:
             self.nbatches += 1
 
         # Randomly shuffle the data if requested
-        if shuffle:
+        if shuffle and isinstance(raw_data, list):
             rng_shuffle(raw_data)
 
-        # Preload the data in batches if requested
-        if preload:
-            self.data = []
-            for i in range(self.nbatches):
-                data = data_constructor(raw_data[i * batch_size : (i + 1) * batch_size])
+        # Preload the data in batches
+        self.data = []
+        for i in range(self.nbatches):
+            data = f(raw_data[i * batch_size : (i + 1) * batch_size])
 
-                self.data.append(data)  # pyright: ignore
-        else:
-            self.data = raw_data
+            self.data.append(data)
 
     def __iter__(self):
         self.idx = 0
@@ -176,36 +192,13 @@ class LeopoldDataLoader:
         self.idx += 1
 
         # If Configurations are already loaded send the right one
-        if isinstance(self.data[0], LeopoldData):
-            return self.data[idx]  # pyright: ignore
-
-        # Construct the data and return
-        beg = idx * self.batch_size
-        return self.__data_constructor(self.data[beg : beg + self.batch_size])  # pyright: ignore
+        return self.data[idx]
 
     def __getitem__(self, idx: int) -> LeopoldData:
-        # If preloaded simply use that
-        if isinstance(self.data[0], LeopoldData):
-            return self.data[idx]  # pyright: ignore
-
-        # Make negative go the other way around
-        if idx < 0:
-            idx = 0 if idx < -self.nbatches else self.nbatches + idx
-
-        # See if we hit the end
-        if idx >= self.nbatches:
-            raise KeyError(
-                f"try indexed position {idx} in array with {self.nbatches} entries"
-            )
-
-        beg = idx * self.batch_size
-        return self.__data_constructor(self.data[beg : beg + self.batch_size])  # pyright: ignore
+        return self.data[idx]
 
     def __len__(self) -> int:
-        if isinstance(self.data[0], LeopoldData):
-            return sum([d.config.box.shape[0] for d in self.data])  # pyright: ignore
-
-        return len(self.data)
+        return sum([d.config.box.shape[0] for d in self.data])
 
 
 # ==== FUNCTIONS ==== #
@@ -396,7 +389,6 @@ def leopold_load_datasets(
     conf_file: str | dict,
     share_info: bool = True,
     batch_size: int = 1,
-    preload: bool = True,
     shuffle: bool = True,
 ) -> dict[str, LeopoldDataLoader]:
     """Load the Leopold dataset inside a configuration
@@ -455,9 +447,9 @@ def leopold_load_datasets(
     # Construct the final dataloader
     datasets = {}
     for info, (key, value) in zip(infos, raw_data.items()):
-        f = leopold_data_constructor(info, scalar_labels, vector_labels)
-
-        datasets[key] = LeopoldDataLoader(value, f, info, batch_size, preload, shuffle)
+        datasets[key] = LeopoldDataLoader(
+            value, scalar_labels, vector_labels, info, batch_size, shuffle
+        )
 
     return datasets
 
@@ -493,18 +485,16 @@ def save_dictionary_to_hdf5(group: Group, data: dict, compression: int = 9) -> N
                 )[:] = value
 
 
-# TODO: modify the data loader to avoid using the data constructor since it's an
-#       additional step, you can simply pass the labels that you want to load, makes
-#       much more sens. Also, allow raw input to be an hdf5 group and create
-#       dataloader out of it.
-
-
-def dataloader_to_hdf5(
+def leopold_dataloader_to_hdf5(
     group: Group,
     loader: LeopoldDataLoader,
     save_data: bool = True,
     compression: int = 9,
 ) -> None:
+    # Save general attributes
+    group.attrs["batch_size"] = loader.batch_size
+    group.attrs["nbatches"] = loader.nbatches
+
     # Save info on the dataset
     g = group.require_group("info")
 
@@ -533,8 +523,58 @@ def dataloader_to_hdf5(
         save_dictionary_to_hdf5(group.require_group("labels"), labels)
 
 
+def leopold_info_from_hdf5(group: Group) -> LeopoldDataInfo:
+    # See if group has info subgroup
+    if "info" not in group.keys():
+        raise KeyError(f"the group {group.name} has no info subgroup")
+
+    # Retrive info
+    info, g = {}, Group(group["info"].id)
+
+    for key in g.keys():
+        info[key] = Dataset(g[key].id)[:]
+
+    return LeopoldDataInfo(**info)
+
+
+def leopold_data_from_hdf5(group: Group) -> list[LeopoldData]:
+    # Get metadata
+    nbatches = group.attrs.get("nbatches", 0)
+    batch_size = group.attrs.get("batch_size", 0)
+
+    if nbatches == 0 or batch_size == 0:
+        raise KeyError(f"group {group.name} is not a Leopold dataset")
+
+    # Get the groups for easy use
+    config_g = Group(group["configurations"].id)
+    labels_g = Group(group["labels"].id)
+
+    # Collect real data
+    data = []
+    for i in range(nbatches):
+        config, labels = {}, {}
+        beg, end = i * batch_size, (i + 1) * batch_size
+
+        for key in config_g.keys():
+            config[key] = jnp.asarray(Dataset(config_g[key].id)[beg:end])
+
+        for key in labels_g.keys():
+            value = jnp.asarray(Dataset(labels_g[key].id)[beg:end])
+
+            # Check everithing has value
+            if len(value) > 0:
+                labels[key] = value
+            else:
+                labels[key] = None
+
+        config = Configuration(**config)
+        labels = Labels(**labels)
+
+        data.append(LeopoldData(config, labels))
+
+    return data
+
+
 # ==== TEST ==== #
 if __name__ == "__main__":
-    data = leopold_load_datasets("test.yaml", batch_size=20, preload=False)
-
-    conf, label = data["train"][-1]
+    pass
