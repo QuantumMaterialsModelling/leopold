@@ -358,7 +358,7 @@ class Leopold(nn.Module):
     n_harmo: int = 2
 
     n_convo: int = 2
-    hidden_irr: Irreps = Irreps("O3", "48x0e + 8x1e")
+    hidden_irr: str = "48x0e + 8x1e"
     r_cutof: float = 3.5
     n_neighbour: float = 1.0
 
@@ -378,6 +378,9 @@ class Leopold(nn.Module):
 
     @nn.compact
     def __call__(self, graph: GraphsTuple):
+        # Convert hidden_irr to Irreps
+        hidden_irr = Irreps("O3", self.hidden_irr)
+
         # Get edges
         dR = jnp.asarray(graph.edges)
         R = jnp.linalg.norm(dR, axis=-1)
@@ -398,11 +401,11 @@ class Leopold(nn.Module):
         reciev = jnp.asarray(graph.receivers)
 
         # Perform convolution
-        conv = Linear(self.hidden_irr)(nodes)
+        conv = Linear(hidden_irr)(nodes)
         for _ in range(self.n_convo):
             # Get the output irreps of the tensor product
-            scalar_irr = self.hidden_irr.filter(keep=[cue.O3(0, 1), cue.O3(0, -1)])
-            vector_irr = self.hidden_irr.filter(drop=[cue.O3(0, 1), cue.O3(0, -1)])
+            scalar_irr = hidden_irr.filter(keep=[cue.O3(0, 1), cue.O3(0, -1)])
+            vector_irr = hidden_irr.filter(drop=[cue.O3(0, 1), cue.O3(0, -1)])
 
             hidden_irr = scalar_irr + vector_irr.new_scalars(vector_irr.num_irreps)
             hidden_irr += vector_irr

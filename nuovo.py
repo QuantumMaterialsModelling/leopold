@@ -38,7 +38,7 @@ import cuequivariance_jax as cuex
 from cuequivariance_jax import RepArray
 
 # Dataclass
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 
 # Types
 from jraph import GraphsTuple
@@ -145,33 +145,54 @@ def save_data_to_hdf5(
         save_params_to_hdf5(group.require_group("labels"), labels)
 
 
+@dataclass
+class Occhi:
+    colore: int = 0
+    sopracciglia: str = "test"
+
+
+@dataclass
+class Barba:
+    lunghezza: float = 1.0
+
+
+@dataclass
+class Faccia:
+    barba: Barba = field(default_factory=lambda: Barba())
+    occhi: Occhi = field(default_factory=lambda: Occhi())
+
+
 # ==== MAIN ==== #
 
 
 def main():
+    faccia = Faccia()
+
+    print(asdict(faccia))
+
     # Get data loader
-    data = leopold_load_datasets(
-        {"dataset": {"test": "train.xyz"}}, batch_size=5, shuffle=False
-    )
-    data = data["test"]
-
-    # take first entry
-    (pos, ele, box), _ = data[0]
-
-    # Construct graph
-    get_graph = get_graph_constructor(pos[0], box[0], 3.5)
-
-    graph = get_graph(pos[1], ele[1], box[1])
-
-    # Construct model
-    model = nn.Leopold(len(data.info.species) + len(data.info.pol_types))
-
-    param = model.init(jrn.PRNGKey(0), graph)
-
-    # Save parameters to HDF5
-    with File("test.h5", "a") as f:
-        save_params_to_hdf5(f.require_group("models"), param)
-        leopold_dataloader_to_hdf5(f.require_group("datasets"), data)
+    # data = leopold_load_datasets(
+    #     {"dataset": {"test": "train.xyz"}}, batch_size=5, shuffle=False
+    # )
+    # data = data["test"]
+    #
+    # # take first entry
+    # (pos, ele, box), _ = data[0]
+    #
+    # # Construct graph
+    # get_graph = get_graph_constructor(pos[0], box[0], 3.5)
+    #
+    # graph = get_graph(pos[1], ele[1], box[1])
+    #
+    # # Construct model
+    # model = nn.Leopold(len(data.info.species) + len(data.info.pol_types))
+    #
+    # param = model.init(jrn.PRNGKey(0), graph)
+    #
+    # # Save parameters to HDF5
+    # with File("test.h5", "a") as f:
+    #     save_params_to_hdf5(f.require_group("models"), param)
+    #     leopold_dataloader_to_hdf5(f.require_group("datasets"), data)
 
 
 if __name__ == "__main__":

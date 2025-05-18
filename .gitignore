@@ -5,6 +5,10 @@ src/__pycache__/*
 src/leopold/__pycache__/*
 src/old/__pycache__/*
 
+logs/*
+results/*
+
+
 data.xyz
 vaspout.h5
 test.yaml

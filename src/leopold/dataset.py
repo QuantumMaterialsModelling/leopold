@@ -8,8 +8,6 @@ contact:  luca.leoni12@unibo.it
 
 # ==== DEPENDENCIES ==== #
 
-# RANDOM
-from random import shuffle as rng_shuffle
 
 # MATH
 import numpy as np
@@ -25,11 +23,10 @@ from ase import Atoms
 from ase.io import read as ase_read
 
 # JAX
+import jax
+import jax.random as jrn
 import jax.numpy as jnp
-from jax import Array
-
-# YAML
-import yaml
+from jax import Array, Device
 
 # DATACLASS
 from dataclasses import dataclass, asdict
@@ -108,6 +105,9 @@ class LeopoldData(NamedTuple):
     config: Configuration
     labels: Labels
 
+    def __len__(self) -> int:
+        return self.config.box.shape[0]
+
 
 class LeopoldDataLoader:
     """Data loader for the Leopold model
@@ -124,22 +124,40 @@ class LeopoldDataLoader:
     """
 
     info: LeopoldDataInfo
-    data: list[LeopoldData]
+    data: LeopoldData
 
     nbatches: int
     batch_size: int = 1
+    device: Device = jax.devices("cuda")[0]
 
     def __init__(
         self,
-        raw_data: list[Atoms] | Group,
+        raw_data: list[Atoms] | Group | LeopoldData,
         scalar_labels: dict[str, str] = DEFAULT_SCALAR_LABELS,
         vector_labels: dict[str, str] = DEFAULT_VECTOR_LABELS,
         info: LeopoldDataInfo | None = None,
         batch_size: int = 1,
+        device: Device = jax.devices("cuda")[0],
         shuffle: bool = True,
     ) -> None:
+        # Set the device
+        self.device = device
+
+        # If LeopoldData are directly given simply accept them
+        if isinstance(raw_data, LeopoldData):
+            self.data = raw_data
+
+            if info is None:
+                raise ValueError("when LeopoldData are given to data loader then info on the dataset must be given by the user (cannot infer types)")
+
+            self.info = info
+            self.batch_size = batch_size
+            self.nbatches = len(raw_data) // batch_size
+            if len(raw_data) % batch_size != 0:
+                self.nbatches += 1
+
         # If an HDF5 group is given everithing is easy
-        if isinstance(raw_data, Group):
+        elif isinstance(raw_data, Group):
             # Collect metadata
             self.info = leopold_info_from_hdf5(raw_data)
             self.nbatches = raw_data.attrs.get("nbatches", 0)
@@ -151,31 +169,52 @@ class LeopoldDataLoader:
             # Collect data
             self.data = leopold_data_from_hdf5(raw_data)
 
-            # Finish here
-            return
+        # Real raw_data were given
+        else:
+            # Load data from list of ASE atoms
+            self.info = leopold_data_info(raw_data, vector_labels) if info is None else info
 
-        # Load data from list of ASE atoms
-        self.info = leopold_data_info(raw_data, vector_labels) if info is None else info
+            # Get the data constructor function
+            cpu_device = jax.devices("cpu")[0]
+            f = leopold_data_constructor(self.info, scalar_labels, vector_labels, cpu_device)
 
-        # Get the data constructor function
-        f = leopold_data_constructor(self.info, scalar_labels, vector_labels)
+            # Compute the number of batches
+            self.batch_size = batch_size
+            self.nbatches = len(raw_data) // batch_size
+            if len(raw_data) % batch_size != 0:
+                self.nbatches += 1
 
-        # Compute the number of batches
-        self.batch_size = batch_size
-        self.nbatches = len(raw_data) // batch_size
-        if len(raw_data) % batch_size != 0:
-            self.nbatches += 1
+            # Preload the data in batches
+            self.data = f(raw_data)
 
-        # Randomly shuffle the data if requested
-        if shuffle and isinstance(raw_data, list):
-            rng_shuffle(raw_data)
+        # Shuffle if wanted
+        if shuffle:
+            self.shuffle(jrn.PRNGKey(0))
 
-        # Preload the data in batches
-        self.data = []
-        for i in range(self.nbatches):
-            data = f(raw_data[i * batch_size : (i + 1) * batch_size])
+    def shuffle(self, rng_key: Array) -> None:
+        perm = jrn.permutation(rng_key, len(self))
 
-            self.data.append(data)
+        conf = self.data.config._asdict()
+        labe = self.data.labels._asdict()
+
+        new_conf = {k: v[perm] for k, v in conf.items()}
+        new_labe = {k: v[perm] if v is not None else None for k, v in labe.items()}
+
+        self.data = LeopoldData(Configuration(**new_conf), Labels(**new_labe)) # pyright: ignore
+
+    def split(self, idx):
+        conf = self.data.config._asdict()
+        labe = self.data.labels._asdict()
+
+        new_conf = {k: jnp.split(v, [idx], axis=0) for k, v in conf.items()}
+        new_labe = {k: jnp.split(v, [idx], axis=0) if v is not None else None for k, v in labe.items()}
+
+        new_conf = [{k: v[i] for k, v in new_conf.items()} for i in range(len(idx))]
+        new_labe = [{k: v[i] if v is not None else None for k, v in new_labe.items()} for i in range(len(idx))]
+
+        data = [LeopoldData(Configuration(**c), Labels(**l)) for c, l in zip(new_conf, new_labe)] # pyright: ignore
+
+        return [LeopoldDataLoader(d, info=self.info, batch_size=self.batch_size, device=self.device) for d in data]
 
     def __iter__(self):
         self.idx = 0
@@ -191,14 +230,24 @@ class LeopoldDataLoader:
         idx = self.idx
         self.idx += 1
 
-        # If Configurations are already loaded send the right one
-        return self.data[idx]
+        # Get beginning and end
+        beg = idx * self.batch_size
+        end = beg + self.batch_size
 
-    def __getitem__(self, idx: int) -> LeopoldData:
-        return self.data[idx]
+        # If Configurations are already loaded send the right one
+        return self[beg:end]
+
+    def __getitem__(self, idx) -> LeopoldData:
+        conf = self.data.config._asdict()
+        labe = self.data.labels._asdict()
+
+        new_conf = {k: jax.device_put(v[idx], self.device) for k, v in conf.items()}
+        new_labe = {k: jax.device_put(v[idx], self.device) if v is not None else None for k, v in labe.items()}
+
+        return LeopoldData(Configuration(**new_conf), Labels(**new_labe)) # pyright: ignore
 
     def __len__(self) -> int:
-        return sum([d.config.box.shape[0] for d in self.data])
+        return self.data.config.box.shape[0]
 
 
 # ==== FUNCTIONS ==== #
@@ -244,7 +293,7 @@ def read(
 
 
 def leopold_data_constructor(
-    info: LeopoldDataInfo, scalar_labels: dict[str, str], vector_labels: dict[str, str]
+    info: LeopoldDataInfo, scalar_labels: dict[str, str], vector_labels: dict[str, str], device: Device = jax.default_device
 ) -> Callable[[list[Atoms]], LeopoldData]:
     """Construct the data constructor function
 
@@ -305,9 +354,9 @@ def leopold_data_constructor(
 
         # Load on GPU memory
         confs = Configuration(
-            **{key: jnp.asarray(value) for key, value in confs.items()}
+            **{key: jnp.asarray(value, device=device) for key, value in confs.items()}
         )
-        labels = Labels(**{key: jnp.asarray(value) for key, value in labels.items()})
+        labels = Labels(**{key: jnp.asarray(value, device=device) for key, value in labels.items()})
 
         return LeopoldData(confs, labels)
 
@@ -386,19 +435,26 @@ def leopold_data_info(
 
 
 def leopold_load_datasets(
-    conf_file: str | dict,
+    data_paths: dict[str, str],
+    labels: dict[str, dict] | None = None,
     share_info: bool = True,
     batch_size: int = 1,
-    shuffle: bool = True,
+    shuffle: bool = False,
 ) -> dict[str, LeopoldDataLoader]:
     """Load the Leopold dataset inside a configuration
 
-    Read the configuration file and load the datasets with the specifics present
-    on it. It's also possible to load them from a dictionary that posses a similar
-    sintax, thus {"dataset": {"dataset1": "path1", "dataset2": "path2" ...}}
+    Read and load the datasets specified in a dictionary object containign the datasets
+    you want to read as follows: 
+        data_paths = {"dataset1": "path1", "dataset2": "path2" ...}. 
+    Every dataset will be read using ASE and the different labels are collected searching 
+    inside the info and arrays objects of ASE Atoms using the labels provided in the
+    second variable or the ones given by default:
+        labels = {"scalar": {"energy": "name_energy"}, "vector": {...}},
+    scalars are searched in Atoms.info, whiel vectors in Atoms.arrays.
 
     Args:
-        conf_file: path to the configuration file or dictionary with configuration
+        data_paths: dictionary containing info on datasets path
+        labels: dictionary with informations related to how process labels
         share_info: share the datasets info between them instead of searching one for each of them
         batch_size: size of the batches
         preload: preload all the data on the GPU to reduce possible overhead of computations
@@ -407,31 +463,20 @@ def leopold_load_datasets(
     Returns:
         dictionary with keys the name of the dataset and values the associated dataloader
     """
-    # if was not read just read it
-    if isinstance(conf_file, str):
-        with open(conf_file, "r") as f:
-            conf = yaml.safe_load(f)
-    else:
-        conf = conf_file.copy()
-
     # Modify labels as user requested
     scalar_labels = DEFAULT_SCALAR_LABELS.copy()
     vector_labels = DEFAULT_VECTOR_LABELS.copy()
 
-    if conf["dataset"].get("labels") is not None:
-        if conf["dataset"]["labels"].get("scalar") is not None:
-            scalar_labels.update(conf["dataset"]["labels"].get("scalar"))
-        if conf["dataset"]["labels"].get("vector") is not None:
-            vector_labels.update(conf["dataset"]["labels"].get("vector"))
+    if labels is not None:
+        if "scalar" in labels.keys():
+            scalar_labels.update(labels["scalar"])
+        if "vector" in labels.keys():
+            vector_labels.update(labels["vector"])
 
     # Get dataset files path and read on CPU
     raw_data: dict[str, list[Atoms]] = {}
-    for name in conf["dataset"].keys():
-        # Avoid try to read the leables as datasets
-        if name == "labels":
-            continue
-
-        raw_data[name] = read(conf["dataset"][name], scalar_labels, vector_labels)
+    for name, path in data_paths.items():
+        raw_data[name] = read(path, scalar_labels, vector_labels)
 
     # Collect info on datasets
     if share_info:
@@ -537,42 +582,30 @@ def leopold_info_from_hdf5(group: Group) -> LeopoldDataInfo:
     return LeopoldDataInfo(**info)
 
 
-def leopold_data_from_hdf5(group: Group) -> list[LeopoldData]:
-    # Get metadata
-    nbatches = group.attrs.get("nbatches", 0)
-    batch_size = group.attrs.get("batch_size", 0)
-
-    if nbatches == 0 or batch_size == 0:
-        raise KeyError(f"group {group.name} is not a Leopold dataset")
-
+def leopold_data_from_hdf5(group: Group) -> LeopoldData:
     # Get the groups for easy use
     config_g = Group(group["configurations"].id)
     labels_g = Group(group["labels"].id)
 
     # Collect real data
-    data = []
-    for i in range(nbatches):
-        config, labels = {}, {}
-        beg, end = i * batch_size, (i + 1) * batch_size
+    config, labels = {}, {}
 
-        for key in config_g.keys():
-            config[key] = jnp.asarray(Dataset(config_g[key].id)[beg:end])
+    for key in config_g.keys():
+        config[key] = jnp.asarray(Dataset(config_g[key].id)[:])
 
-        for key in labels_g.keys():
-            value = jnp.asarray(Dataset(labels_g[key].id)[beg:end])
+    for key in labels_g.keys():
+        value = jnp.asarray(Dataset(labels_g[key].id)[:])
 
-            # Check everithing has value
-            if len(value) > 0:
-                labels[key] = value
-            else:
-                labels[key] = None
+        # Check everithing has value
+        if len(value) > 0:
+            labels[key] = value
+        else:
+            labels[key] = None
 
-        config = Configuration(**config)
-        labels = Labels(**labels)
+    config = Configuration(**config)
+    labels = Labels(**labels)
 
-        data.append(LeopoldData(config, labels))
-
-    return data
+    return LeopoldData(config, labels)
 
 
 # ==== TEST ==== #
