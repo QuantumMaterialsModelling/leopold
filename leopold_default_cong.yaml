@@ -9,9 +9,10 @@ datasets:
       charges: decomposed_charges
       forces: forces
       magmoms: decomposed_magmoms
-  val_split: 0.05
+  val_split: 0.2
 general:
   logs_dir: logs
+  logs_lev: 20
   models_dir: checkpoints
   name: LEOPOLD
   result_dir: results
@@ -27,7 +28,7 @@ model:
   n_neighbour: 1.0
   odd_act: tanh
   odd_gate: soft
-  r_cutof: 3.5
+  r_cutoff: 3.5
   radial_mlp_activa: swish
   radial_mlp_hidden: 64
   radial_mlp_layers: 2

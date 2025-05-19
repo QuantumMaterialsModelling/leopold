@@ -12,10 +12,9 @@ contact:  luca.leoni12@unibo.it
 import numpy as np
 
 # JAX
+import jax
 import jax.numpy as jnp
-
-# Plot
-import matplotlib.pyplot as plt
+import jax.random as jrn
 
 # Logging
 import logging
@@ -29,9 +28,9 @@ import os
 import yaml
 
 # Leopold
-from leopold.dataset import DEFAULT_SCALAR_LABELS, DEFAULT_VECTOR_LABELS, leopold_load_datasets
-from leopold.nn import Leopold
+from leopold.dataset import leopold_load_datasets
 from leopold.config import read_leopold_configuration, LeopoldConfiguration
+from leopold.observables import leopold_model
 from leopold import __version__
 
 # ArgumentParser
@@ -131,7 +130,7 @@ def main():
     # configuration with some description of the options
     if args.configuration is None:
         conf = asdict(LeopoldConfiguration())
-        with open("leopold_default_cong.yaml", "w")as f:
+        with open("leopold_default_cong.yaml", "w") as f:
             yaml.safe_dump(conf, f)
 
         return
@@ -147,26 +146,70 @@ def main():
     # ---- DATASET
     logging.info("Reading dataset")
     dconf = conf.datasets
+    mconf = conf.model
 
     # See if training exist
     if "train" not in dconf.data_paths:
         raise KeyError("a traing dataset must be given inside the configuration!")
 
     # Create the dataloaders
-    data = leopold_load_datasets(dconf.data_paths, dconf.labels, batch_size=dconf.batch_size)
+    data = leopold_load_datasets(
+        dconf.data_paths,
+        dconf.labels,
+        batch_size=dconf.batch_size,
+        r_cutoff=mconf["r_cutoff"],
+    )
 
     # Perform the validation splitting if needed
     if "validation" not in data.keys():
-        pass
+        logging.info(
+            f"No validation set present, perform a {int(dconf.val_split * 100)}% split"
+        )
+        # Compute the splitting idx
+        idx = int(len(data["train"]) * dconf.val_split)
+        data["validation"], data["train"] = data["train"].split([idx])
 
-    # Get the training set means
-    # TODO: make so that in the info of the dataset the mean and std of labels are 
-    #       shown in a species dependent manner. Then add them to the model config
+    # Tell the user what we know about this
+    logging.info("Uploaded succesfully the following datasets:")
+    for key, loader in data.items():
+        logging.info(f"\t-{key}: {len(loader)} configurations")
 
+    # Tell about other quantities
+    logging.info(
+        f"Average number of neighbours in dataset: {data['train'].info.average_neigh:.2f}"
+    )
 
-    print(data["train"][0:3])
     # ---- MODEL
+    logging.info("Constructing model")
 
+    # Take number of elements in the dataset
+    mconf["n_elems"] = len(data["train"].info.species) + 1
+
+    # Set the average number of neighbours
+    mconf["n_neighbour"] = data["train"].info.average_neigh
+
+    # Get energy scale and shift
+    mconf["energy_shift"] = data["train"].get_mean("energy")
+    mconf["energy_scale"] = data["train"].get_std("energy")
+
+    # Get species dependent scale and shift
+    mconf["magchg_shift"] = jnp.append(
+        data["train"].get_mean("magmoms"), data["train"].get_mean("charges"), 1
+    )
+    mconf["magchg_shift"] = jnp.append(
+        data["train"].get_std("magmoms"), data["train"].get_std("charges"), 1
+    )
+
+    # TODO:
+    # tell about average energy and stuff
+
+    # Construct the model
+    example_data = data["train"][data["train"].info.max_neigh_idx]
+    apply, init = leopold_model(mconf, *example_data.config)
+
+    # Initialize model
+    key = jrn.PRNGKey(conf.general.seed)
+    param = init(key)
 
 
 if __name__ == "__main__":

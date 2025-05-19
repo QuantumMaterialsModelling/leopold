@@ -358,8 +358,8 @@ class Leopold(nn.Module):
     n_harmo: int = 2
 
     n_convo: int = 2
-    hidden_irr: str = "48x0e + 8x1e"
-    r_cutof: float = 3.5
+    hidden_irr: str = "48x0e + 48x1e"
+    r_cutoff: float = 3.5
     n_neighbour: float = 1.0
 
     energy_scale: Array | float = 1.0
@@ -390,7 +390,7 @@ class Leopold(nn.Module):
 
         # Embed edges
         dR = cuex.spherical_harmonics([i for i in range(self.n_harmo + 1)], dR)
-        R = BesselEmbedding(self.n_basis, self.r_cutof - 0.5, self.r_cutof)(R)
+        R = BesselEmbedding(self.n_basis, self.r_cutoff - 0.5, self.r_cutoff)(R)
 
         # Transform nodes in Rep Array
         nodes = jnp.asarray(graph.nodes)

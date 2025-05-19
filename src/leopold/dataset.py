@@ -8,8 +8,8 @@ contact:  luca.leoni12@unibo.it
 
 # ==== DEPENDENCIES ==== #
 
-
 # MATH
+from jax._src.source_info_util import raw_frame_to_frame
 import numpy as np
 
 # HDF5
@@ -21,6 +21,7 @@ from cuequivariance_jax import RepArray
 # ASE
 from ase import Atoms
 from ase.io import read as ase_read
+from ase.neighborlist import neighbor_list
 
 # JAX
 import jax
@@ -92,6 +93,8 @@ class LeopoldDataInfo:
     species: Array
     pol_types: Array
     max_num_atoms: int
+    average_neigh: float
+    max_neigh_idx: int
 
 
 class LeopoldData(NamedTuple):
@@ -121,14 +124,15 @@ class LeopoldDataLoader:
         data: list LeopoldData object loaded on the device
         nbatches: number of batches present
         batch_size: size of every batch
+        device: jax device on which to upload the data
     """
 
     info: LeopoldDataInfo
     data: LeopoldData
 
     nbatches: int
-    batch_size: int = 1
-    device: Device = jax.devices("cuda")[0]
+    batch_size: int
+    device: Device
 
     def __init__(
         self,
@@ -148,7 +152,9 @@ class LeopoldDataLoader:
             self.data = raw_data
 
             if info is None:
-                raise ValueError("when LeopoldData are given to data loader then info on the dataset must be given by the user (cannot infer types)")
+                raise ValueError(
+                    "when LeopoldData are given to data loader then info on the dataset must be given by the user (cannot infer types)"
+                )
 
             self.info = info
             self.batch_size = batch_size
@@ -172,11 +178,15 @@ class LeopoldDataLoader:
         # Real raw_data were given
         else:
             # Load data from list of ASE atoms
-            self.info = leopold_data_info(raw_data, vector_labels) if info is None else info
+            self.info = (
+                leopold_data_info(raw_data, vector_labels) if info is None else info
+            )
 
             # Get the data constructor function
             cpu_device = jax.devices("cpu")[0]
-            f = leopold_data_constructor(self.info, scalar_labels, vector_labels, cpu_device)
+            f = leopold_data_constructor(
+                self.info, scalar_labels, vector_labels, cpu_device
+            )
 
             # Compute the number of batches
             self.batch_size = batch_size
@@ -200,21 +210,63 @@ class LeopoldDataLoader:
         new_conf = {k: v[perm] for k, v in conf.items()}
         new_labe = {k: v[perm] if v is not None else None for k, v in labe.items()}
 
-        self.data = LeopoldData(Configuration(**new_conf), Labels(**new_labe)) # pyright: ignore
+        self.data = LeopoldData(Configuration(**new_conf), Labels(**new_labe))  # pyright: ignore
 
     def split(self, idx):
         conf = self.data.config._asdict()
         labe = self.data.labels._asdict()
 
-        new_conf = {k: jnp.split(v, [idx], axis=0) for k, v in conf.items()}
-        new_labe = {k: jnp.split(v, [idx], axis=0) if v is not None else None for k, v in labe.items()}
+        new_conf = {k: jnp.split(v, idx, axis=0) for k, v in conf.items()}
+        new_labe = {
+            k: jnp.split(v, idx, axis=0) if v is not None else None
+            for k, v in labe.items()
+        }
 
-        new_conf = [{k: v[i] for k, v in new_conf.items()} for i in range(len(idx))]
-        new_labe = [{k: v[i] if v is not None else None for k, v in new_labe.items()} for i in range(len(idx))]
+        new_conf = [{k: v[i] for k, v in new_conf.items()} for i in range(len(idx) + 1)]
+        new_labe = [
+            {k: v[i] if v is not None else None for k, v in new_labe.items()}
+            for i in range(len(idx) + 1)
+        ]
 
-        data = [LeopoldData(Configuration(**c), Labels(**l)) for c, l in zip(new_conf, new_labe)] # pyright: ignore
+        data = [
+            LeopoldData(Configuration(**co), Labels(**la))  # pyright: ignore
+            for co, la in zip(new_conf, new_labe)
+        ]
 
-        return [LeopoldDataLoader(d, info=self.info, batch_size=self.batch_size, device=self.device) for d in data]
+        return [
+            LeopoldDataLoader(
+                d, info=self.info, batch_size=self.batch_size, device=self.device
+            )
+            for d in data
+        ]
+
+    def get_mean(self, label: str) -> Array:
+        data = self.data.labels._asdict()[label]
+
+        # If scalar then it's easy
+        if label in DEFAULT_SCALAR_LABELS.keys():
+            return jax.device_put(data.mean(0), self.device)
+
+        # If vector do a species dependent mean
+        res = []
+        for s in self.data.config.ones_hot[:, :, :-1].T:
+            res.append(data[s.T == 1].mean(0))
+
+        return jnp.asarray(jax.device_put(res, self.device))
+
+    def get_std(self, label: str) -> Array:
+        data = self.data.labels._asdict()[label]
+
+        # If scalar then it's easy
+        if label in DEFAULT_SCALAR_LABELS.keys():
+            return jax.device_put(data.std(0), self.device)
+
+        # If vector do a species dependent mean
+        res = []
+        for s in self.data.config.ones_hot[:, :, :-1].T:
+            res.append(data[s.T == 1].std(0))
+
+        return jnp.asarray(jax.device_put(res, self.device))
 
     def __iter__(self):
         self.idx = 0
@@ -242,9 +294,12 @@ class LeopoldDataLoader:
         labe = self.data.labels._asdict()
 
         new_conf = {k: jax.device_put(v[idx], self.device) for k, v in conf.items()}
-        new_labe = {k: jax.device_put(v[idx], self.device) if v is not None else None for k, v in labe.items()}
+        new_labe = {
+            k: jax.device_put(v[idx], self.device) if v is not None else None
+            for k, v in labe.items()
+        }
 
-        return LeopoldData(Configuration(**new_conf), Labels(**new_labe)) # pyright: ignore
+        return LeopoldData(Configuration(**new_conf), Labels(**new_labe))  # pyright: ignore
 
     def __len__(self) -> int:
         return self.data.config.box.shape[0]
@@ -293,7 +348,10 @@ def read(
 
 
 def leopold_data_constructor(
-    info: LeopoldDataInfo, scalar_labels: dict[str, str], vector_labels: dict[str, str], device: Device = jax.default_device
+    info: LeopoldDataInfo,
+    scalar_labels: dict[str, str],
+    vector_labels: dict[str, str],
+    device: Device = jax.default_device,
 ) -> Callable[[list[Atoms]], LeopoldData]:
     """Construct the data constructor function
 
@@ -356,7 +414,9 @@ def leopold_data_constructor(
         confs = Configuration(
             **{key: jnp.asarray(value, device=device) for key, value in confs.items()}
         )
-        labels = Labels(**{key: jnp.asarray(value, device=device) for key, value in labels.items()})
+        labels = Labels(
+            **{key: jnp.asarray(value, device=device) for key, value in labels.items()}
+        )
 
         return LeopoldData(confs, labels)
 
@@ -364,8 +424,7 @@ def leopold_data_constructor(
 
 
 def leopold_data_info(
-    raw_data: list[Atoms],
-    vector_labels: dict[str, str],
+    raw_data: list[Atoms], vector_labels: dict[str, str], r_cutoff: float | None = None
 ) -> LeopoldDataInfo:
     """Get Leopold data info from raw data
 
@@ -393,6 +452,15 @@ def leopold_data_info(
 
     max_num_compon = [atoms.arrays[mag_label].shape[1] for atoms in raw_data]
     max_num_compon = max(max_num_compon)
+
+    # Perform a simple neighbour analysis
+    mean_neigh, max_neigh = 1.0, -1
+    if r_cutoff is not None:
+        neigh = [neighbor_list("i", a, r_cutoff) for a in raw_data]
+        neigh = [np.unique(rec, return_counts=True)[1] for rec in neigh]
+
+        mean_neigh = float(np.mean(np.concatenate(neigh)))
+        max_neigh = int(np.argmax([np.max(n) for n in neigh]))
 
     # Collect all magnetization and ones_hot encoding.
     # To allow vectorization entries will be padded to maximum n_atoms
@@ -431,7 +499,7 @@ def leopold_data_info(
             "Leopold is not yet capable of handling polarons of multiple type (s, p, d or f) present at the same time!"
         )
 
-    return LeopoldDataInfo(species, pol_character, max_num_atoms)
+    return LeopoldDataInfo(species, pol_character, max_num_atoms, mean_neigh, max_neigh)
 
 
 def leopold_load_datasets(
@@ -439,14 +507,16 @@ def leopold_load_datasets(
     labels: dict[str, dict] | None = None,
     share_info: bool = True,
     batch_size: int = 1,
+    device: Device = jax.devices("cuda")[0],
     shuffle: bool = False,
+    r_cutoff: float | None = None,
 ) -> dict[str, LeopoldDataLoader]:
     """Load the Leopold dataset inside a configuration
 
     Read and load the datasets specified in a dictionary object containign the datasets
-    you want to read as follows: 
-        data_paths = {"dataset1": "path1", "dataset2": "path2" ...}. 
-    Every dataset will be read using ASE and the different labels are collected searching 
+    you want to read as follows:
+        data_paths = {"dataset1": "path1", "dataset2": "path2" ...}.
+    Every dataset will be read using ASE and the different labels are collected searching
     inside the info and arrays objects of ASE Atoms using the labels provided in the
     second variable or the ones given by default:
         labels = {"scalar": {"energy": "name_energy"}, "vector": {...}},
@@ -459,6 +529,7 @@ def leopold_load_datasets(
         batch_size: size of the batches
         preload: preload all the data on the GPU to reduce possible overhead of computations
         shuffle: randomly shuffle the data in the dataset
+        r_cutoff: if given, perform a neighbour analysis for maximum performance in graph construction
 
     Returns:
         dictionary with keys the name of the dataset and values the associated dataloader
@@ -484,16 +555,21 @@ def leopold_load_datasets(
         larger = max(raw_data.keys(), key=lambda x: len(raw_data[x]))
 
         # Copy the info of the larger dataset to all others
-        infos = [leopold_data_info(raw_data[larger], vector_labels)] * len(raw_data)
+        infos = [leopold_data_info(raw_data[larger], vector_labels, r_cutoff)] * len(
+            raw_data
+        )
     else:
         # Get info for every dataset
-        infos = [leopold_data_info(value, vector_labels) for value in raw_data.values()]
+        infos = [
+            leopold_data_info(value, vector_labels, r_cutoff)
+            for value in raw_data.values()
+        ]
 
     # Construct the final dataloader
     datasets = {}
     for info, (key, value) in zip(infos, raw_data.items()):
         datasets[key] = LeopoldDataLoader(
-            value, scalar_labels, vector_labels, info, batch_size, shuffle
+            value, scalar_labels, vector_labels, info, batch_size, device, shuffle
         )
 
     return datasets
