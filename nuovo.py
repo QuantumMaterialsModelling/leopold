@@ -13,7 +13,9 @@ from functools import partial
 
 # LEOPOLD
 import leopold.nn as nn
+from leopold.observables import leopold_graph_constructor
 from leopold.dataset import (
+    LeopoldData,
     leopold_load_datasets,
     LeopoldDataLoader,
     leopold_dataloader_to_hdf5,
@@ -24,9 +26,10 @@ from h5py import File, Group
 
 # Math
 import numpy as np
+import jax
 import jax.numpy as jnp
 import jax.random as jrn
-from jax import Array, vmap, jit
+from jax import Array, value_and_grad, vmap, jit
 
 # JAX-MD
 from jax_md import space, partition
@@ -48,110 +51,12 @@ from flax.linen import FrozenDict
 # ==== FUNCTIONS ==== #
 
 
-def get_graph_constructor(pos: Array, box: Array, r_cutoff: float):
-    # Get the space metric
-    d, _ = space.periodic_general(box)
-
-    # Allocate sparse neighbor list
-    neighbor_fns = partition.neighbor_list(
-        d,
-        box,
-        r_cutoff,
-        format=partition.Sparse,
-        fractional_coordinates=True,
-    )
-    neighbor = neighbor_fns.allocate(pos)
-
-    def get_graph(position: Array, elements: Array, box: Array):
-        # Update neighbor list with new positions and box
-        neigh = neighbor.update(position, box=box)
-
-        # Create mask to avoid account self and padding
-        mask = neigh.idx[0] < (elements == 1).any(1).sum()
-        mask = mask & (neigh.idx[0] != neigh.idx[1])
-
-        # Get sender and reciver
-        sender, reciver = neigh.idx
-
-        # Compute edges and set masked ones to zero
-        dR = vmap(partial(d, box=box))(position[sender], position[reciver])  # pyright: ignore
-        dR = jnp.where(mask[:, None], dR, 0)
-
-        # Construct jax graph
-        return partition.to_jraph(neigh, nodes=elements, edges=dR)
-
-    return get_graph
-
-
-def save_params_to_hdf5(group: Group, params: FrozenDict | dict, compression: int = 9):
-    for key, value in params.items():
-        if isinstance(value, dict):
-            save_params_to_hdf5(group.require_group(key), value)
-        else:
-            # Handle RepArray
-            if isinstance(value, RepArray):
-                data = np.asarray(value.array)
-
-                d = group.require_dataset(
-                    key, data.shape, data.dtype, compression=compression
-                )
-
-                # Save irreps as attributes
-                d.attrs["Irreps"] = str(value.irreps)
-                d[:] = data
-            else:
-                # Handle scalars
-                if np.isscalar(value):
-                    data = np.asarray([value])
-                else:
-                    data = np.asarray(value)
-
-                group.require_dataset(
-                    key, data.shape, data.dtype, compression=compression
-                )[:] = data
-
-
-def save_data_to_hdf5(
-    group: Group,
-    loader: LeopoldDataLoader,
-    save_data: bool = True,
-    compression: int = 9,
-):
-    # Save info on the dataset
-    g = group.require_group("info")
-
-    prova = asdict(loader.info)
-    save_params_to_hdf5(g, prova, compression)
-
-    # If requested save the whole dataset
-    if save_data:
-        # Gather config and labels data to GPU
-        confis = {key: [] for key in loader[0].config._asdict().keys()}
-        labels = {key: [] for key in loader[0].labels._asdict().keys()}
-        for batch in loader:
-            for key, value in batch.config._asdict().items():
-                confis[key].extend(value)
-
-            for key, value in batch.labels._asdict().items():
-                if value is None:
-                    continue
-                labels[key].extend(value)
-
-        confis = {key: np.asarray(value) for key, value in confis.items()}
-        labels = {key: np.asarray(value) for key, value in labels.items()}
-
-        # Save it on HDF5
-        save_params_to_hdf5(group.require_group("configurations"), confis)
-        save_params_to_hdf5(group.require_group("labels"), labels)
-
-
 # ==== MAIN ==== #
 
 
 def main():
-    Get data loader
     data = leopold_load_datasets(
-        {"dataset": {"test": "train.xyz"}}, batch_size=5, shuffle=False
+        {"test": "train.xyz"}, batch_size=1, shuffle=False, r_cutoff=3.5
     )
     data = data["test"]
 
@@ -159,19 +64,42 @@ def main():
     (pos, ele, box), _ = data[0]
 
     # Construct graph
-    get_graph = get_graph_constructor(pos[0], box[0], 3.5)
+    get_graph = leopold_graph_constructor(pos, box, 3.5)
 
-    graph = get_graph(pos[1], ele[1], box[1])
+    graph = get_graph(pos, ele, box)
+
+    R = jnp.linalg.norm(graph.edges, axis=-1)
+    test = nn.BesselEmbedding(8, 3.0, 3.5)
+    param = test.init(jrn.PRNGKey(0), R)
+
+    # R = jnp.where(R == 0, 1, R)
+
+    @jit
+    def loss(params, r):
+        res = test.apply(params, r)
+
+        return res.sum()
+
+    val, grad = value_and_grad(loss)(param, R)
+
+    print(val)
+    print(grad)
 
     # Construct model
-    model = nn.Leopold(len(data.info.species) + len(data.info.pol_types))
-
-    param = model.init(jrn.PRNGKey(0), graph)
-
-    # Save parameters to HDF5
-    with File("test.h5", "a") as f:
-        save_params_to_hdf5(f.require_group("models"), param)
-        leopold_dataloader_to_hdf5(f.require_group("datasets"), data)
+    # model = nn.Leopold(len(data.info.species) + len(data.info.pol_types))
+    #
+    # param = model.init(jrn.PRNGKey(0), graph)
+    #
+    # @jit
+    # def loss(params, batch: LeopoldData):
+    #     graph = get_graph(*batch.config)
+    #     energy, _ = model.apply(params, graph)
+    #
+    #     return jnp.square(energy - batch.labels.energy).mean()
+    #
+    # val, grad = value_and_grad(loss)(param, data[0])
+    #
+    # print(grad)
 
 
 if __name__ == "__main__":

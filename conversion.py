@@ -40,7 +40,7 @@ def parse_args() -> Namespace:
 def main():
     args = parse_args()
 
-    data = read(args.path, index=":3", format="extxyz")
+    data = read(args.path, index=":", format="extxyz")
     if not isinstance(data, list):
         data = [data]
 

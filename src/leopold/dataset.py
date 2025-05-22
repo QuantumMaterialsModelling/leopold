@@ -9,14 +9,8 @@ contact:  luca.leoni12@unibo.it
 # ==== DEPENDENCIES ==== #
 
 # MATH
-from jax._src.source_info_util import raw_frame_to_frame
 import numpy as np
-
-# HDF5
-from h5py import Group, Dataset
-
-# CUEQUIVARIANCE
-from cuequivariance_jax import RepArray
+from numpy.typing import NDArray
 
 # ASE
 from ase import Atoms
@@ -30,10 +24,10 @@ import jax.numpy as jnp
 from jax import Array, Device
 
 # DATACLASS
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 # Typing
-from typing import Callable, NamedTuple
+from typing import Callable, NamedTuple, Optional
 
 # ==== DATA DEFAULTS ==== #
 
@@ -88,13 +82,20 @@ class LeopoldDataInfo:
         species: species present in the dataset
         pol_types: character of the polaron present (s, p, d or f)
         max_num_atoms: maximum number of atoms in dataset, used for padding
+        average_neigh: average number of neighbours inside the dataset
+        max_neigh_idx: index of the structure that will require the larger memory to allocate the neighbour list
+        averages: dictionary with the averages of the label quantities inside the dataset
+        deviations: dictionary witht he standard deviations of the label quantities inside the dataset
     """
 
-    species: Array
-    pol_types: Array
+    species: NDArray
+    pol_types: NDArray
     max_num_atoms: int
     average_neigh: float
     max_neigh_idx: int
+
+    averages: dict[str, NDArray]
+    deviations: dict[str, NDArray]
 
 
 class LeopoldData(NamedTuple):
@@ -130,19 +131,16 @@ class LeopoldDataLoader:
     info: LeopoldDataInfo
     data: LeopoldData
 
-    nbatches: int
     batch_size: int
     device: Device
 
     def __init__(
         self,
-        raw_data: list[Atoms] | Group | LeopoldData,
-        scalar_labels: dict[str, str] = DEFAULT_SCALAR_LABELS,
-        vector_labels: dict[str, str] = DEFAULT_VECTOR_LABELS,
-        info: LeopoldDataInfo | None = None,
+        raw_data: list[Atoms] | LeopoldData,
         batch_size: int = 1,
         device: Device = jax.devices("cuda")[0],
         shuffle: bool = True,
+        **kwargs,
     ) -> None:
         # Set the device
         self.device = device
@@ -151,36 +149,27 @@ class LeopoldDataLoader:
         if isinstance(raw_data, LeopoldData):
             self.data = raw_data
 
-            if info is None:
+            self.info = kwargs.get("info", None)
+            if self.info is None:
                 raise ValueError(
                     "when LeopoldData are given to data loader then info on the dataset must be given by the user (cannot infer types)"
                 )
-
-            self.info = info
-            self.batch_size = batch_size
-            self.nbatches = len(raw_data) // batch_size
-            if len(raw_data) % batch_size != 0:
-                self.nbatches += 1
-
-        # If an HDF5 group is given everithing is easy
-        elif isinstance(raw_data, Group):
-            # Collect metadata
-            self.info = leopold_info_from_hdf5(raw_data)
-            self.nbatches = raw_data.attrs.get("nbatches", 0)
-            self.batch_size = raw_data.attrs.get("batch_size", 0)
-
-            if self.nbatches == 0 or self.batch_size == 0:
-                raise KeyError(f"group {raw_data.name} is not a Leopold dataset")
-
-            # Collect data
-            self.data = leopold_data_from_hdf5(raw_data)
-
         # Real raw_data were given
         else:
-            # Load data from list of ASE atoms
-            self.info = (
-                leopold_data_info(raw_data, vector_labels) if info is None else info
-            )
+            # Get kwargs
+            self.info = kwargs.get("info", None)
+            scalar_labels = kwargs.get("scalar_labels", DEFAULT_SCALAR_LABELS)
+            vector_labels = kwargs.get("scalar_labels", DEFAULT_VECTOR_LABELS)
+
+            # See if info was given
+            if self.info is None:
+                # Get the cutoff radius
+                r_cutoff = kwargs.get("r_cutoff", None)
+
+                # Load data from list of ASE atoms
+                self.info = leopold_data_info(
+                    raw_data, scalar_labels, vector_labels, r_cutoff
+                )
 
             # Get the data constructor function
             cpu_device = jax.devices("cpu")[0]
@@ -188,18 +177,23 @@ class LeopoldDataLoader:
                 self.info, scalar_labels, vector_labels, cpu_device
             )
 
-            # Compute the number of batches
-            self.batch_size = batch_size
-            self.nbatches = len(raw_data) // batch_size
-            if len(raw_data) % batch_size != 0:
-                self.nbatches += 1
-
             # Preload the data in batches
             self.data = f(raw_data)
+
+        # Compute the number of batches
+        self.batch_size = batch_size
 
         # Shuffle if wanted
         if shuffle:
             self.shuffle(jrn.PRNGKey(0))
+
+    @property
+    def nbatches(self) -> int:
+        n = len(self.data) // self.batch_size
+
+        if len(self.data) % self.batch_size != 0:
+            return n + 1
+        return n
 
     def shuffle(self, rng_key: Array) -> None:
         perm = jrn.permutation(rng_key, len(self))
@@ -240,34 +234,6 @@ class LeopoldDataLoader:
             for d in data
         ]
 
-    def get_mean(self, label: str) -> Array:
-        data = self.data.labels._asdict()[label]
-
-        # If scalar then it's easy
-        if label in DEFAULT_SCALAR_LABELS.keys():
-            return jax.device_put(data.mean(0), self.device)
-
-        # If vector do a species dependent mean
-        res = []
-        for s in self.data.config.ones_hot[:, :, :-1].T:
-            res.append(data[s.T == 1].mean(0))
-
-        return jnp.asarray(jax.device_put(res, self.device))
-
-    def get_std(self, label: str) -> Array:
-        data = self.data.labels._asdict()[label]
-
-        # If scalar then it's easy
-        if label in DEFAULT_SCALAR_LABELS.keys():
-            return jax.device_put(data.std(0), self.device)
-
-        # If vector do a species dependent mean
-        res = []
-        for s in self.data.config.ones_hot[:, :, :-1].T:
-            res.append(data[s.T == 1].std(0))
-
-        return jnp.asarray(jax.device_put(res, self.device))
-
     def __iter__(self):
         self.idx = 0
 
@@ -305,10 +271,9 @@ class LeopoldDataLoader:
         return self.data.config.box.shape[0]
 
 
-# ==== FUNCTIONS ==== #
+# ==== GENERAL FUNCTIONS ==== #
 
 
-# TODO: in future make it possible to read also hdf5 dataset
 def read(
     path: str, scalar_labels: dict[str, str], vector_labels: dict[str, str]
 ) -> list[Atoms]:
@@ -345,6 +310,151 @@ def read(
             atoms.arrays[charge_label] = atoms.arrays[charge_label][:, np.newaxis]
 
     return data
+
+
+# ==== INFO FUNCTIONS ==== #
+
+
+def leopold_data_info(
+    raw_data: list[Atoms],
+    scalar_labels: dict[str, str],
+    vector_labels: dict[str, str],
+    r_cutoff: Optional[float] = None,
+) -> LeopoldDataInfo:
+    """Get Leopold data info from raw data
+
+    Get object containing general info about the loaded dataset.
+
+    Args:
+        raw_data: raw list of ASE atoms containg the data
+        scalar_labels: labels for the scalar quantities
+        vector_labels: labels for the vectorial quantities
+        r_cutoff: cutoff radius used to perform a neighbour analysis
+
+    Returns:
+        LeopoldDataInfo object
+
+    Raises:
+        NotImplementedError: Leopold is not yet capable of handling polarons of multiple type (s, p, d or f) present at the same time!
+    """
+    # ---- Collect all informations
+
+    # Definition of storing variables
+    elements, neighs, max_num_atoms = {}, [], 0
+    mean_scalar = {k: 0 for k in scalar_labels.keys()}
+    std_scalar = {k: 0 for k in scalar_labels.keys()}
+    mean_vector = {k: {} for k in vector_labels.keys()}
+    std_vector = {k: {} for k in vector_labels.keys()}
+
+    # Main loop over the dataset
+    for atoms in raw_data:
+        # See if this is the frame with maximum atoms
+        max_num_atoms = max([max_num_atoms, len(atoms)])
+
+        # Get species and add possible new elements
+        atomic_num = atoms.get_atomic_numbers()
+        elements_a, counts_e = np.unique(atomic_num, return_counts=True)
+
+        for e in elements_a:
+            if e not in elements.keys():
+                elements[e] = 0
+                for key in vector_labels.keys():
+                    mean_vector[key][e] = 0
+                    std_vector[key][e] = 0
+
+        # Add counting of elements
+        for e, count in zip(elements_a, counts_e):
+            elements[e] += count
+
+        # Get scalar labels
+        for key, name in scalar_labels.items():
+            val = atoms.info[name]
+
+            # Energy is stored as per atom
+            if key == "energy":
+                val /= len(atoms)
+
+            mean_scalar[key] += val
+            std_scalar[key] += val * val
+
+        # Get vector labels
+        for key, name in vector_labels.items():
+            for e, count in zip(elements_a, counts_e):
+                # Get atoms of that species
+                idxs = atomic_num == e
+
+                # Do calculations
+                mean_vector[key][e] += np.sum(atoms.arrays[name][idxs], axis=0)
+                std_vector[key][e] += np.sum(atoms.arrays[name][idxs] ** 2, axis=0)
+
+        # Neighbour analysis
+        if r_cutoff is not None:
+            neigh = np.unique(neighbor_list("i", atoms, r_cutoff), return_counts=True)
+            neighs.append(np.sum(neigh[1]))
+
+    # ---- Analysis
+
+    # Get species in order
+    species = np.sort([k for k in elements.keys()])
+
+    # perform final average
+    averages: dict[str, NDArray] = {
+        k: np.asarray(v / len(neighs)) for k, v in mean_scalar.items()
+    }
+    deviations = {
+        k: np.sqrt(np.mean(v) - averages[k] ** 2) for k, v in std_scalar.items()
+    }
+
+    for k, v in mean_vector.items():
+        mean, std = [], []
+        for e in species:
+            m = v[e] / elements[e]
+            s = std_vector[k][e] / elements[e]
+
+            mean.append(m)
+            std.append(np.sqrt(s - m**2))
+        averages[k] = np.asarray(mean)
+        deviations[k] = np.asarray(std)
+
+    # Final neighbour quantities
+    if len(neighs) != 0:
+        avg_neigh = np.sum(neighs) / sum(elements.values())
+        max_neigh = int(np.argmax(neighs))
+    else:
+        avg_neigh, max_neigh = 1.0, -1
+
+    # ---- Search polaron character
+
+    # see total electron minus average
+    pol_character = []
+    for e in species:
+        val = np.abs(np.round(mean_vector["magmoms"][e] / len(raw_data)))
+        pol_character.append(np.arange(len(val))[val > 0])
+    pol_character = np.unique(np.concatenate(pol_character))
+
+    # Exctract only component of mag and chg related to polaronic character
+    for key in ["magmoms", "charges"]:
+        averages[key] = averages[key][:, pol_character]
+        deviations[key] = deviations[key][:, pol_character]
+
+    # TODO: Find a way to deal with multicharacter polaron systems (HARD!)
+    if len(pol_character) > 1:
+        raise NotImplementedError(
+            "Leopold is not yet capable of handling polarons of multiple type (s, p, d or f) present at the same time!"
+        )
+
+    return LeopoldDataInfo(
+        species,
+        pol_character,
+        max_num_atoms,
+        avg_neigh,
+        max_neigh,
+        averages,
+        deviations,
+    )
+
+
+# ==== DATA CONSTRUCTOR ==== #
 
 
 def leopold_data_constructor(
@@ -423,83 +533,7 @@ def leopold_data_constructor(
     return data_constructor
 
 
-def leopold_data_info(
-    raw_data: list[Atoms], vector_labels: dict[str, str], r_cutoff: float | None = None
-) -> LeopoldDataInfo:
-    """Get Leopold data info from raw data
-
-    Get object containing general info about the loaded dataset.
-
-    Args:
-        raw_data: raw list of ASE atoms containg the data
-        vector_labels: labels for the vectorial quantities, only "magmoms" one is used
-
-    Returns:
-        LeopoldDataInfo object
-
-    Raises:
-        NotImplementedError: Leopold is not yet capable of handling polarons of multiple type (s, p, d or f) present at the same time!
-    """
-    # First get species
-    element = [atoms.get_atomic_numbers() for atoms in raw_data]
-    species = jnp.unique(jnp.concatenate(element))
-
-    # Search maximum number of atoms
-    max_num_atoms = max([len(atoms) for atoms in raw_data])
-
-    # Search maximum number of components in magmoms
-    mag_label = vector_labels["magmoms"]
-
-    max_num_compon = [atoms.arrays[mag_label].shape[1] for atoms in raw_data]
-    max_num_compon = max(max_num_compon)
-
-    # Perform a simple neighbour analysis
-    mean_neigh, max_neigh = 1.0, -1
-    if r_cutoff is not None:
-        neigh = [neighbor_list("i", a, r_cutoff) for a in raw_data]
-        neigh = [np.unique(rec, return_counts=True)[1] for rec in neigh]
-
-        mean_neigh = float(np.mean(np.concatenate(neigh)))
-        max_neigh = int(np.argmax([np.max(n) for n in neigh]))
-
-    # Collect all magnetization and ones_hot encoding.
-    # To allow vectorization entries will be padded to maximum n_atoms
-    magmoms, ones_hot = [], []
-    for atoms in raw_data:
-        element = atoms.get_atomic_numbers()
-        magmom = atoms.arrays[mag_label]
-
-        atom_padding = max_num_atoms - len(atoms)
-        comp_padding = max_num_compon - magmom.shape[1]
-
-        one_hot = (element[:, jnp.newaxis] == species).astype(jnp.int32)
-
-        ones_hot.append(np.pad(one_hot, ((0, atom_padding), (0, 0))))
-        magmoms.append(np.pad(magmom, ((0, atom_padding), (0, comp_padding))))
-    magmoms, ones_hot = np.array(magmoms), np.array(ones_hot)
-
-    # Get polaronic character
-    pol_character = []
-    for s in ones_hot.T:
-        # get magnetization of the species
-        magmom = jnp.abs(magmoms[s.T == 1])
-
-        # Take the one above the mean (a polaron is present)
-        pol_mag = jnp.where(magmom > magmom.mean(0), magmom, 0)
-        pol_mag = jnp.round(pol_mag).sum(0)
-
-        # The non zero entry tells us that polarons of that character are present
-        pol_character.append(*jnp.where(pol_mag))
-
-    pol_character = jnp.unique(jnp.concatenate(pol_character))
-
-    # TODO: Find a way to deal with multicharacter polaron systems (HARD!)
-    if len(pol_character) > 1:
-        raise NotImplementedError(
-            "Leopold is not yet capable of handling polarons of multiple type (s, p, d or f) present at the same time!"
-        )
-
-    return LeopoldDataInfo(species, pol_character, max_num_atoms, mean_neigh, max_neigh)
+# ==== GENERAL LOAD DATASET ==== #
 
 
 def leopold_load_datasets(
@@ -509,7 +543,7 @@ def leopold_load_datasets(
     batch_size: int = 1,
     device: Device = jax.devices("cuda")[0],
     shuffle: bool = False,
-    r_cutoff: float | None = None,
+    r_cutoff: Optional[float] = None,
 ) -> dict[str, LeopoldDataLoader]:
     """Load the Leopold dataset inside a configuration
 
@@ -555,13 +589,13 @@ def leopold_load_datasets(
         larger = max(raw_data.keys(), key=lambda x: len(raw_data[x]))
 
         # Copy the info of the larger dataset to all others
-        infos = [leopold_data_info(raw_data[larger], vector_labels, r_cutoff)] * len(
-            raw_data
-        )
+        infos = [
+            leopold_data_info(raw_data[larger], scalar_labels, vector_labels, r_cutoff)
+        ] * len(raw_data)
     else:
         # Get info for every dataset
         infos = [
-            leopold_data_info(value, vector_labels, r_cutoff)
+            leopold_data_info(value, scalar_labels, vector_labels, r_cutoff)
             for value in raw_data.values()
         ]
 
@@ -569,121 +603,23 @@ def leopold_load_datasets(
     datasets = {}
     for info, (key, value) in zip(infos, raw_data.items()):
         datasets[key] = LeopoldDataLoader(
-            value, scalar_labels, vector_labels, info, batch_size, device, shuffle
+            value,
+            batch_size,
+            device,
+            shuffle,
+            scalar_labels=scalar_labels,
+            vector_labels=vector_labels,
+            info=info,
         )
 
     return datasets
 
 
-# ==== HDF5 ==== #
-
-
-def save_dictionary_to_hdf5(group: Group, data: dict, compression: int = 9) -> None:
-    for key, value in data.items():
-        if isinstance(value, dict):
-            save_dictionary_to_hdf5(group.require_group(key), value)
-        else:
-            # Handle RepArray
-            if isinstance(value, RepArray):
-                arr = np.asarray(value.array)
-
-                d = group.require_dataset(
-                    key, arr.shape, arr.dtype, compression=compression
-                )
-
-                # Save irreps as attributes
-                d.attrs["Irreps"] = str(value.irreps)
-                d[:] = arr
-            else:
-                # Handle scalars
-                if np.isscalar(value):
-                    value = np.asarray([value])
-                else:
-                    value = np.asarray(value)
-
-                group.require_dataset(
-                    key, value.shape, value.dtype, compression=compression
-                )[:] = value
-
-
-def leopold_dataloader_to_hdf5(
-    group: Group,
-    loader: LeopoldDataLoader,
-    save_data: bool = True,
-    compression: int = 9,
-) -> None:
-    # Save general attributes
-    group.attrs["batch_size"] = loader.batch_size
-    group.attrs["nbatches"] = loader.nbatches
-
-    # Save info on the dataset
-    g = group.require_group("info")
-
-    prova = asdict(loader.info)
-    save_dictionary_to_hdf5(g, prova, compression)
-
-    # If requested save the whole dataset
-    if save_data:
-        # Gather config and labels data to GPU
-        confis = {key: [] for key in loader[0].config._asdict().keys()}
-        labels = {key: [] for key in loader[0].labels._asdict().keys()}
-        for batch in loader:
-            for key, value in batch.config._asdict().items():
-                confis[key].extend(value)
-
-            for key, value in batch.labels._asdict().items():
-                if value is None:
-                    continue
-                labels[key].extend(value)
-
-        confis = {key: np.asarray(value) for key, value in confis.items()}
-        labels = {key: np.asarray(value) for key, value in labels.items()}
-
-        # Save it on HDF5
-        save_dictionary_to_hdf5(group.require_group("configurations"), confis)
-        save_dictionary_to_hdf5(group.require_group("labels"), labels)
-
-
-def leopold_info_from_hdf5(group: Group) -> LeopoldDataInfo:
-    # See if group has info subgroup
-    if "info" not in group.keys():
-        raise KeyError(f"the group {group.name} has no info subgroup")
-
-    # Retrive info
-    info, g = {}, Group(group["info"].id)
-
-    for key in g.keys():
-        info[key] = Dataset(g[key].id)[:]
-
-    return LeopoldDataInfo(**info)
-
-
-def leopold_data_from_hdf5(group: Group) -> LeopoldData:
-    # Get the groups for easy use
-    config_g = Group(group["configurations"].id)
-    labels_g = Group(group["labels"].id)
-
-    # Collect real data
-    config, labels = {}, {}
-
-    for key in config_g.keys():
-        config[key] = jnp.asarray(Dataset(config_g[key].id)[:])
-
-    for key in labels_g.keys():
-        value = jnp.asarray(Dataset(labels_g[key].id)[:])
-
-        # Check everithing has value
-        if len(value) > 0:
-            labels[key] = value
-        else:
-            labels[key] = None
-
-    config = Configuration(**config)
-    labels = Labels(**labels)
-
-    return LeopoldData(config, labels)
-
-
 # ==== TEST ==== #
 if __name__ == "__main__":
+    atoms = read("test.xyz", DEFAULT_SCALAR_LABELS, DEFAULT_VECTOR_LABELS)
+
+    info = leopold_data_info(atoms, DEFAULT_SCALAR_LABELS, DEFAULT_VECTOR_LABELS, 3.5)
+
+    print(info)
     pass

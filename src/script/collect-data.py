@@ -84,7 +84,9 @@ def get_atoms_from_file(file: str) -> list[Atoms]:
         if bad:
             continue
 
-        atoms = Atoms(elements, positions[i], cell=lattices[i], pbc=True)
+        atoms = Atoms(
+            elements, scaled_positions=positions[i], cell=lattices[i], pbc=True
+        )
 
         # Set scalar quantities
         for key, item in scalar_quantities.items():

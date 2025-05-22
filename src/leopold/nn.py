@@ -130,7 +130,7 @@ class FullyConnectedTensorProduct(nn.Module):
         )
         w = self.param("weights", lambda x: cuex.randn(x, e.operands[0]))
 
-        return cuex.equivariant_polynomial(e, [w, x1, x2])  # pyright: ignore
+        return cuex.equivariant_polynomial(e, [w, x1, x2], impl="jax")  # pyright: ignore
 
 
 class Linear(nn.Module):
@@ -153,7 +153,7 @@ class Linear(nn.Module):
         #       inside line 72 of linear.py in e3nn
         w = self.param("weights", lambda key: cuex.randn(key, e.operands[0]))
 
-        return cuex.equivariant_polynomial(e, [w, x])  # pyright: ignore
+        return cuex.equivariant_polynomial(e, [w, x], impl="jax")  # pyright: ignore
 
 
 class BesselEmbedding(nn.Module):
@@ -178,9 +178,12 @@ class BesselEmbedding(nn.Module):
     outer_cutoff: float
 
     @nn.compact
-    def __call__(self, r: Array) -> Array:
+    def __call__(self, R: Array) -> Array:
         # Define frequencies of Bessel functions
         w = self.param("frequences", lambda _: jnp.arange(1, self.count + 1) * jnp.pi)
+
+        # Avoid infinities for distances that are too small
+        r = jnp.where(R > 1e-5, R, 1.0)
 
         # Broadcast (N,) to (N, 1)
         r = r[:, jnp.newaxis]
@@ -200,7 +203,7 @@ class BesselEmbedding(nn.Module):
         envelop = jnp.where(r < self.inner_cutoff, 1, envelop)
 
         # Final multiplication
-        return jnp.where(r > 1e-5, b, 0) * envelop
+        return jnp.where(R[:, jnp.newaxis] > 1e-5, b, 0) * envelop
 
 
 class Gate(nn.Module):
@@ -379,7 +382,14 @@ class Leopold(nn.Module):
     @nn.compact
     def __call__(self, graph: GraphsTuple):
         # Convert hidden_irr to Irreps
-        hidden_irr = Irreps("O3", self.hidden_irr)
+        target_irr = Irreps("O3", self.hidden_irr)
+
+        # Get the output irreps of the tensor product
+        scalar_irr = target_irr.filter(keep=[cue.O3(0, 1), cue.O3(0, -1)])
+        vector_irr = target_irr.filter(drop=[cue.O3(0, 1), cue.O3(0, -1)])
+
+        hidden_irr = scalar_irr + vector_irr.new_scalars(vector_irr.num_irreps)
+        hidden_irr += vector_irr
 
         # Get edges
         dR = jnp.asarray(graph.edges)
@@ -401,23 +411,22 @@ class Leopold(nn.Module):
         reciev = jnp.asarray(graph.receivers)
 
         # Perform convolution
-        conv = Linear(hidden_irr)(nodes)
+        conv = Linear(target_irr)(nodes)
         for _ in range(self.n_convo):
-            # Get the output irreps of the tensor product
-            scalar_irr = hidden_irr.filter(keep=[cue.O3(0, 1), cue.O3(0, -1)])
-            vector_irr = hidden_irr.filter(drop=[cue.O3(0, 1), cue.O3(0, -1)])
-
-            hidden_irr = scalar_irr + vector_irr.new_scalars(vector_irr.num_irreps)
-            hidden_irr += vector_irr
-
             # Construct the tensor product descriptor
-            e = cue.descriptors.fully_connected_tensor_product(
+            e = cue.descriptors.channelwise_tensor_product(
                 conv.irreps, dR.irreps, hidden_irr
+            )
+
+            # Construct the symmetric contraction
+            c = cue.descriptors.symmetric_contraction(
+                Irreps("O3", str(e.outputs[0])), hidden_irr, (1, 2, 3)
             )
 
             # Get dimensions for MLP and non linearities
             mlp_dims = (self.radial_mlp_hidden,) * self.radial_mlp_layers
-            mlp_dims += (e.operands[0].dim,)
+            mlp_dime = mlp_dims + (e.operands[0].dim,)
+            mlp_dimc = mlp_dims + (c.operands[0].dim,)
             mlp_gate = (self.radial_mlp_activa,) * self.radial_mlp_layers + ("none",)
 
             # First linear layer
@@ -425,16 +434,20 @@ class Leopold(nn.Module):
 
             # Create the self connection
             self_conn = FullyConnectedTensorProduct(
-                Irreps("O3", str(e.outputs[0])).simplify(),
+                hidden_irr,
             )(conv, nodes)
 
             # Get weights and perform convolution
-            w = MLP(mlp_dims, mlp_gate, False)(R)
+            w = MLP(mlp_dime, mlp_gate, False)(R)
             edge_feat = cuex.equivariant_polynomial(e, [w, conv[sender], dR])
+            assert not isinstance(edge_feat, list)
+
+            w = MLP(mlp_dimc, mlp_gate, False)(R)
+            edge_feat = cuex.equivariant_polynomial(c, [w, edge_feat])
 
             # Check no problem arised and simplify
             assert not isinstance(edge_feat, list)
-            edge_feat = edge_feat.simplify()
+            edge_feat = edge_feat
 
             # Perform a scatter sum averaged beetween neighbours
             res = jnp.zeros((conv.shape[0], edge_feat.shape[1]))
@@ -456,16 +469,10 @@ class Leopold(nn.Module):
 
         # Energy calculation
         energy = Linear(second_irreps)(conv)
-        energy = Gate(self.even_gate, self.even_act, self.odd_gate, self.odd_act)(
-            energy
-        )
         energy = Linear(Irreps("O3", "1x0e"))(energy).array
 
         # Magnetization and Charge calculation
         magchg = Linear(second_irreps)(conv)
-        magchg = Gate(self.even_gate, self.even_act, self.odd_gate, self.odd_act)(
-            magchg
-        )
         magchg = Linear(Irreps("O3", "2x0e"))(magchg).array
 
         # Scale and Shift energy
@@ -480,7 +487,7 @@ class Leopold(nn.Module):
         scale = nodes.array[:, :-1] @ scale
         shift = nodes.array[:, :-1] @ shift
 
-        energy = jnp.sum(scale * energy + shift, axis=0)
+        energy = jnp.sum(scale * energy + shift)
 
         # Scale and Shift magchg
         scale = self.magchg_scale
@@ -494,6 +501,6 @@ class Leopold(nn.Module):
         scale = nodes.array[:, :-1] @ scale
         shift = nodes.array[:, :-1] @ shift
 
-        magchg = jnp.sum(scale * magchg + shift, axis=0)
+        magchg = scale * magchg + shift
 
         return energy, magchg

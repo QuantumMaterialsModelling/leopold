@@ -1,7 +1,8 @@
 datasets:
-  batch_size: 2
-  data_paths:
-    train: train.xyz
+  save_data: True
+  batch_size: 1
+  # data_paths:
+  #   train: train.xyz
   labels:
     scalar:
       energy: energy
@@ -21,7 +22,7 @@ general:
 model:
   even_act: sigmoid
   even_gate: gelu
-  hidden_irr: 48x0e + 8x1e
+  hidden_irr: 48x0e + 48x1e
   n_basis: 8
   n_convo: 2
   n_harmo: 2
@@ -33,10 +34,11 @@ model:
   radial_mlp_hidden: 64
   radial_mlp_layers: 2
 training:
-  chgmag_weight: 1.0
+  smagmo_weight: 1.0
+  magmom_weight: 1.0
+  charge_weight: 1.0
   energy_weight: 1.0
   forces_weight: 1.0
   learning_rate: 0.0005
   max_epoch: 1000
   patience: 200
-  smagmo_weight: 1.0

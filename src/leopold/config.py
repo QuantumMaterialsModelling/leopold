@@ -22,7 +22,7 @@ from leopold.nn import Leopold
 from leopold.dataset import DEFAULT_SCALAR_LABELS, DEFAULT_VECTOR_LABELS
 
 # Typing
-from typing import Union
+from typing import Union, Optional
 
 # ==== OBJECTS ==== #
 
@@ -36,6 +36,16 @@ class LeopoldGeneralOptions:
     logs_dir: str = "logs"
     logs_lev: Union[int, str] = INFO
     use_float64: bool = True
+    checkpoint_file: str = ""
+
+    def __post_init__(self) -> None:
+        # If checkpoint file not given then set it to tag name
+        if self.checkpoint_file == "":
+            self.checkpoint_file = self.tag + ".h5"
+
+    @property
+    def tag(self) -> str:
+        return f"{self.name}-{self.seed}"
 
 
 @dataclass
@@ -43,12 +53,14 @@ class LeopoldTrainingOptions:
     learning_rate: float = 5e-4
     max_epoch: int = 1000
     patience: int = 200
+    restart: bool = False
 
     # Options for the loss function
     energy_weight: float = 1.0
     smagmo_weight: float = 1.0
     forces_weight: float = 1.0
-    chgmag_weight: float = 1.0
+    magmom_weight: float = 1.0
+    charge_weight: float = 1.0
 
 
 @dataclass
@@ -56,6 +68,7 @@ class LeopoldDatasetsOptions:
     data_paths: dict = field(default_factory=lambda: {})
     val_split: float = 0.05
     batch_size: int = 2
+    save_data: bool = True
 
     labels: dict = field(
         default_factory=lambda: {
@@ -119,6 +132,7 @@ def _get_default_hyperparams() -> dict:
     for key in model.copy().keys():
         if "shift" in key or "scale" in key:
             model.pop(key)
+    model.pop("n_neighbour")
     model.pop("n_elems")
 
     return model
