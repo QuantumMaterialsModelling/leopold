@@ -37,6 +37,7 @@ class LeopoldGeneralOptions:
     logs_lev: Union[int, str] = INFO
     use_float64: bool = True
     checkpoint_file: str = ""
+    device: str = "gpu"
 
     def __post_init__(self) -> None:
         # If checkpoint file not given then set it to tag name
@@ -54,6 +55,7 @@ class LeopoldTrainingOptions:
     max_epoch: int = 1000
     patience: int = 200
     restart: bool = False
+    batch_size: int = 2
 
     # Options for the loss function
     energy_weight: float = 1.0
@@ -67,7 +69,6 @@ class LeopoldTrainingOptions:
 class LeopoldDatasetsOptions:
     data_paths: dict = field(default_factory=lambda: {})
     val_split: float = 0.05
-    batch_size: int = 2
     save_data: bool = True
 
     labels: dict = field(

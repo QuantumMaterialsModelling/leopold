@@ -127,8 +127,10 @@ def leopold_graph_constructor(
     return get_graph
 
 
-def leopold_model(conf: dict, pos: Array, elem: Array, box: Array):
-    f = leopold_graph_constructor(pos, box, conf["r_cutoff"])
+def leopold_model(
+    conf: dict, example_pos: Array, example_elem: Array, example_box: Array
+):
+    f = leopold_graph_constructor(example_pos, example_box, conf["r_cutoff"])
     model = Leopold(**conf)
 
     def apply_fn(param, pos, elem, box):
@@ -136,7 +138,7 @@ def leopold_model(conf: dict, pos: Array, elem: Array, box: Array):
         return model.apply(param, graph)
 
     def init_fn(key: Array):
-        graph = f(pos, elem, box)
+        graph = f(example_pos, example_elem, example_box)
         return model.init(key, graph)
 
     return value_and_grad(apply_fn, argnums=1, has_aux=True), init_fn

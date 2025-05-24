@@ -8,9 +8,6 @@ contact:  luca.leoni12@unibo.it
 
 # ==== IMPORTS ==== #
 
-# Math
-import numpy as np
-
 # JAX
 import jax
 import jax.numpy as jnp
@@ -29,10 +26,10 @@ import os
 import yaml
 
 # Leopold
-from leopold.dataset import leopold_load_datasets, LeopoldData, leopold_data_from_hdf5
+from leopold.dataset import leopold_load_datasets, LeopoldData
 from leopold.config import read_leopold_configuration, LeopoldConfiguration
 from leopold.observables import leopold_model
-from leopold.hdf5 import LeopoldCheckpointFile
+from leopold.hdf5 import LeopoldCheckpointFile, LeopoldState
 from leopold import __version__
 
 # Optax
@@ -45,7 +42,7 @@ from argparse import ArgumentParser, Namespace
 from dataclasses import asdict
 
 # Typing
-from typing import Union, Optional, Any
+from typing import Union, Optional
 
 # ==== CONSTANTS ==== #
 
@@ -137,7 +134,7 @@ def main():
     # configuration with some description of the options
     if args.configuration is None:
         conf = asdict(LeopoldConfiguration())
-        with open("leopold_default_cong.yaml", "w") as f:
+        with open("leopold_default_conf.yaml", "w") as f:
             yaml.safe_dump(conf, f)
 
         return
@@ -158,7 +155,10 @@ def main():
     if conf.general.use_float64:
         jax.config.update("jax_enable_x64", True)
 
-    # Search for existing Checkpoint
+    # Get device
+    device = jax.devices(gconf.device)[0]
+
+    # Checkpoint setup
     os.makedirs(gconf.models_dir, exist_ok=True)
 
     fcheck = os.path.join(gconf.models_dir, gconf.checkpoint_file)
@@ -167,22 +167,24 @@ def main():
     else:
         fcheck = LeopoldCheckpointFile(fcheck, "w")
 
+    # Get new or existing training in the checkpoint
+    gtrain = fcheck.create_training(conf)
+
     # ---- DATASET
     logger.info("Reading dataset")
 
     # if data_paths is empty read from HDF5
     if len(dconf.data_paths) == 0:
-        data = fcheck.get_datasets()
+        data = gtrain.get_datasets()
 
-        # See if training exist and is not empty
+        # See if training exist
         if "train" not in data.keys():
             raise KeyError(
                 "a traing dataset must be given, and was not present either in configuration or checkpoint!"
             )
 
-        # Check training dataset is not empty
-        if len(data["train"]) == 0:
-            raise ValueError("training dataset inside checkpoint was empty!")
+        # Construct data loader
+        data = {k: v.get_dataloader(tconf.batch_size, device) for k, v in data.items()}
 
     # Read from configuration
     else:
@@ -194,13 +196,14 @@ def main():
         data = leopold_load_datasets(
             dconf.data_paths,
             dconf.labels,
-            batch_size=dconf.batch_size,
+            batch_size=tconf.batch_size,
+            device=device,
             r_cutoff=mconf["r_cutoff"],
         )
 
         # Save dataset
         for key, loader in data.items():
-            fcheck.write_dataset(key, loader, dconf.save_data)
+            gtrain.attach_dataset(key, loader, save_data=dconf.save_data)
 
     # Perform the validation splitting if needed
     if "validation" not in data.keys():
@@ -221,48 +224,17 @@ def main():
         f"Average number of neighbours in dataset: {data['train'].info.average_neigh:.2f}"
     )
 
-    # ---- MODEL
-    if tconf.restart:
-        logger.info("Taking model from checkpoint")
-
-    else:
-        logger.info("Constructing model")
-
-        # Take number of elements in the dataset
-        mconf["n_elems"] = len(data["train"].info.species) + 1
-
-        # Set the average number of neighbours
-        mconf["n_neighbour"] = data["train"].info.average_neigh
-
-        # Get energy scale and shift
-        mconf["energy_shift"] = data["train"].get_mean("energy")
-        mconf["energy_scale"] = data["train"].get_std("energy")
-
-        # Get species dependent scale and shift
-        mconf["magchg_shift"] = jnp.append(
-            data["train"].get_mean("magmoms"), data["train"].get_mean("charges"), 1
-        )
-        mconf["magchg_shift"] = jnp.append(
-            data["train"].get_std("magmoms"), data["train"].get_std("charges"), 1
-        )
-
-    # TODO:
-    # tell about average energy and stuff
+    # ---- MODEL / OPTIMIZER
+    logger.info("Constructing model")
 
     # Construct the model
     example_data = data["train"][data["train"].info.max_neigh_idx]
-    model, init = leopold_model(mconf, *example_data.config)
-
-    # Initialize model
-    key = jrn.PRNGKey(conf.general.seed)
-    params = init(key)
+    model, init = leopold_model(gtrain.model_conf, *example_data.config)
 
     # Jit the function
     comp_vect_model = jit(vmap(model, (None, 0, 0, 0)))
 
-    # ---- TRAINING
-    tconf = conf.training
-
+    # Construct the optimizer
     opt = optax.chain(
         optax.adam(tconf.learning_rate),
         optax.contrib.reduce_on_plateau(
@@ -270,7 +242,18 @@ def main():
         ),  # Use the learning rate from the scheduler.
     )
 
-    opt_state = opt.init(params)
+    # ---- INITIALIZATION
+    if tconf.restart:
+        params, opt_state, _, _ = gtrain.state
+    else:
+        # Initialize model
+        key = jrn.PRNGKey(conf.general.seed)
+        params = init(key)
+
+        # Initialize Optimizer
+        opt_state = opt.init(params)
+
+    # ---- LOSS DEFINITION
 
     # Set the weight for forces, magmom and charges
     tconf.forces_weight *= data["train"][0].config.ones_hot.shape[-2] ** 2
@@ -302,7 +285,7 @@ def main():
 
         return loss, (e_loss, f_loss, m_loss, c_loss, s_loss)
 
-    # Define the training function
+    # ---- UPDATE DEFINITION
     @jit
     def update(params, opt_state, batch: LeopoldData):
         grad_fn = value_and_grad(loss_fn, has_aux=True)
@@ -326,9 +309,8 @@ def main():
         f"{'Total':>35s} {'Energy':>11s} {'Forces':>12s} {'Magmoms':>12s} {'Charges':>12s} {'Magmom Sum':>12s}  {'Total':>27s} {'Energy':>11s} {'Forces':>12s} {'Toccup':>12s} {'Magmom Sum':>12s} | {'Learning rate':>12s}"
     )
 
-    lowest_loss, patience_count = jnp.inf, 0
-    for i in range(tconf.max_epoch):
-        if patience_count == tconf.patience:
+    for i in range(gtrain.step, tconf.max_epoch):
+        if tconf.patience == gtrain.impatience:
             logger.info("Too many iterations without improvement, stopping training")
             break
 
@@ -381,19 +363,8 @@ def main():
             f"Epoch {i:4} ==> Train: {train_log}   Validation: {valid_log}| {tconf.learning_rate * optax.tree_utils.tree_get(opt_state, 'scale'):12.8f}"
         )
 
-        # Saving checkpoints
-        # os.makedirs(args.checkpoints_dir, exist_ok=True)
-        # with open(check_path + "L.pkl", "wb") as f:
-        #     pickle.dump([config, params, opt_state], f)
-
-        if valid_loss["total"] < lowest_loss:
-            lowest_loss = valid_loss["total"]
-            patience_count = 0
-
-            # with open(check_path + ".pkl", "wb") as f:
-            #     pickle.dump([config, params, opt_state], f)
-        else:
-            patience_count += 1
+        # Saving State
+        gtrain.state = LeopoldState(params, opt_state, float(valid_loss["total"]))
 
 
 if __name__ == "__main__":

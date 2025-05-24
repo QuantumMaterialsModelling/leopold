@@ -18,79 +18,92 @@ from ase import Atoms
 from h5py import File, Group, Dataset
 
 # Cuequivariance
-from cuequivariance_jax import RepArray
+from cuequivariance import IrrepsLayout
 
 # Jax
 import jax
-from jax import Device
+import jax.numpy as jnp
+from jax import Device, tree_util
 
 # Leopold
-from .dataset import (
-    Configuration,
-    Labels,
-    LeopoldData,
-    LeopoldDataInfo,
-    LeopoldDataLoader,
-)
+from leopold.config import LeopoldConfiguration
+from leopold.dataset import LeopoldData, LeopoldDataInfo, LeopoldDataLoader
 
-from .config import (
-    LeopoldConfiguration,
-    LeopoldDatasetsOptions,
-    LeopoldGeneralOptions,
-    LeopoldTrainingOptions,
-)
+# Flax
+from flax.core import FrozenDict
+
+# Optax
+from optax import OptState
+
+# Pickle
+import pickle
 
 # Types
 from dataclasses import asdict
 from enum import Enum, unique
-from typing import Optional, override
+from typing import Optional, Union, NamedTuple, Any
 
 # Warnings
 import warnings
 
 # Version
-from .__init__ import __version__
+from leopold.__init__ import __version__
+
 
 # ==== FUNCTIONS ==== #
 
 
-def save_dictionary_to_hdf5(group: Group, data: dict, compression: int = 9) -> None:
-    for key, value in data.items():
-        if isinstance(value, dict):
-            save_dictionary_to_hdf5(group.require_group(key), value)
-        else:
-            # Handle RepArray
-            if isinstance(value, RepArray):
-                arr = np.asarray(value.array)
+def save_tree_to_hdf5(group: Group, tree: Any, compression: int = 9) -> None:
+    # Flatten the tree
+    leaves, struct = tree_util.tree_flatten(tree)
 
-                d = group.require_dataset(
-                    key, arr.shape, arr.dtype, compression=compression
-                )
+    # Save leafs as datasets
+    for i, leave in enumerate(leaves):
+        # Name of dataset
+        name = f"leave{i}"
 
-                # Save irreps as attributes
-                d.attrs["Irreps"] = str(value.irreps)
-                d[:] = arr
+        # Deal with scalars first
+        if np.isscalar(leave) or np.ndim(leave) == 0:
+            # If it's a string handle it specially
+            if type(leave) is str:
+                group[name] = leave
             else:
-                # Deal with null data
-                if value is None:
-                    group.require_dataset(key, shape=None, dtype="f")
-                    continue
+                group.require_dataset(name, (), np.asarray(leave).dtype)[()] = leave
+        # These are vector data
+        # so data can be compressed
+        else:
+            data = np.asarray(leave)
 
-                # Handle scalars
-                if np.isscalar(value):
-                    group.require_dataset(key, shape=(), dtype=type(value))[()] = value
-                    continue
+            group.require_dataset(
+                name, data.shape, data.dtype, compression=compression
+            )[:] = data
 
-                # Handle real array
-                value = np.asarray(value)
+    # Save the structure as bytes
+    struct = pickle.dumps(struct)
+    group.require_dataset("struct", (1,), f"S{len(struct)}")[()] = struct
 
-                # Deal with empty dataset
-                if value.shape == ():
-                    group.require_dataset(key, shape=None, dtype="f")
-                else:
-                    group.require_dataset(
-                        key, value.shape, value.dtype, compression=compression
-                    )[:] = value
+
+def save_hdf5_to_tree(group: Group, device: Device = jax.devices("gpu")[0]) -> Any:
+    # Collect the struct of the tree
+    struct = pickle.loads(Dataset(group["struct"].id)[()])
+
+    # Collect all the leafs
+    leaves, names = [], [i for i, n in enumerate(group.keys()) if "leave" in n]
+    for name in names:
+        data = Dataset(group[f"leave{name}"].id)[()]
+
+        # If data are bytes then is a string
+        if type(data) is bytes:
+            leaves.append(data.decode())
+        # If scalar return the scalar version
+        elif np.isscalar(data) or np.ndim(data) == 0:
+            leaves.append(data)
+        # The rest should be numbers
+        else:
+            data = jnp.asarray(data, device=device)
+            leaves.append(data)
+
+    return tree_util.tree_unflatten(struct, leaves)
 
 
 # ==== ARCHETIPE FILE ==== #
@@ -135,61 +148,39 @@ class LeopoldHDF5(File):
 
 
 class LeopoldDatasetGroup:
+    group: Group
+
     def __init__(self, group: Group):
-        # Start as empty
-        self.__empty
+        # Set group
+        self.group = group
 
         # Set variables
-        self.__group = group
-        self.__config = group.require_group("configurations")
-        self.__labels = group.require_group("labels")
+        self.__data = group.require_group("data")
+        self.__info = group.require_group("info")
 
-        # See if it's empty
-        try:
-            len(Dataset(self.__config["positions"].id))
-        except TypeError:
-            self.__empty = True
+        # See if empty or full
+        self.__empty = "struct" in self.__data
 
     def __getitem__(self, idx) -> LeopoldData:
         assert not self.__empty, "tried to index an empty LeopoldDataGroup!"
 
-        # Collect real data
-        config, labels = {}, {}
+        # Collect the struct of the tree
+        struct = pickle.loads(Dataset(self.__data["struct"].id)[()])
 
-        # Get configurations data
-        for key in self.__config:
-            d = Dataset(self.__config[key].id)
-
-            # If dataset id empty set empty
-            if d.shape is None:
-                config[key] = None
+        # Collect all the leafs
+        leaves = []
+        for leave in self.__data:
+            if leave == "struct":
                 continue
 
-            config[key] = d[idx]
+            data = jnp.asarray(Dataset(self.__data[leave].id)[idx])
+            leaves.append(data)
 
-        # Get labels data
-        for key in self.__labels:
-            d = Dataset(self.__labels[key].id)
-
-            # If dataset id empty set empty
-            if d.shape is None:
-                config[key] = None
-                continue
-
-            config[key] = d[idx]
-
-        config = Configuration(**config)
-        labels = Labels(**labels)
-
-        return LeopoldData(config, labels)
-
-    @property
-    def group(self) -> Group:
-        return self.__group
+        return tree_util.tree_unflatten(struct, leaves)
 
     @property
     def info(self) -> LeopoldDataInfo:
-        info = self.__group.attrs.__dict__.copy()
+        info = save_hdf5_to_tree(self.__info)
 
         return LeopoldDataInfo(**info)
 
@@ -200,30 +191,20 @@ class LeopoldDatasetGroup:
         compression: int = 9,
     ) -> None:
         # First write down the info
-        for key, val in asdict(loader.info).items():
-            self.__group.attrs[key] = val
+        save_tree_to_hdf5(self.__info, asdict(loader.info))
 
         # Save data
         if save_data:
             # If wanted save all
-            config = loader.data.config._asdict()
-            labels = loader.data.labels._asdict()
-        else:
-            # If not use empty arrays
-            config = {k: None for k in loader.data.config._asdict().keys()}
-            labels = {k: None for k in loader.data.labels._asdict().keys()}
+            save_tree_to_hdf5(self.__data, loader.data, compression)
 
-        # Save it on HDF5
-        save_dictionary_to_hdf5(self.__config, config, compression)
-        save_dictionary_to_hdf5(self.__labels, labels, compression)
-
-        # Set as not empty
-        self.__empty = False
+            # Set as not empty
+            self.__empty = False
 
     def get_dataloader(
         self,
         batch_size: int = 1,
-        device: Device = jax.devices("cuda")[0],
+        device: Device = jax.devices("cpu")[0],
     ) -> LeopoldDataLoader:
         assert not self.__empty, (
             "tried to create a data loader from an empty LeopoldDataGroup!"
@@ -234,48 +215,167 @@ class LeopoldDatasetGroup:
         )
 
 
+class LeopoldState(NamedTuple):
+    params: Union[FrozenDict, dict]
+    opt_state: OptState
+    loss: float
+    observables: Optional[dict[str, float]] = None
+
+
 class LeopoldTrainingGroup:
+    group: Group
+    impatience: int = 0
+
     def __init__(
         self,
         group: Group,
-        train_data: Optional[LeopoldDatasetGroup] = None,
-        valid_data: Optional[LeopoldDatasetGroup] = None,
-        test_data: Optional[LeopoldDatasetGroup] = None,
     ) -> None:
-        self.__group = group
+        # Save the group
+        self.group = group
 
-        self.__last_model = group.require_group("last_model")
-        self.__last_state = group.require_group("last_state")
+        # Create the subgroup we are working with
+        self.__inputs = group.require_group("inputs")
+        self.__datasets = group.require_group("datasets")
+        self.__models = group.require_group("models")
+        self.__state = group.require_group("state")
+        self.__observables = group.require_group("observables")
 
-        if train_data is not None:
-            group["train_data"] = train_data.group
-        elif "train_data" not in group.keys():
-            raise KeyError(f"no training data group provided to training {group.name}")
+        # If group already existing set some stuff
+        if len(self.__inputs) != 0:
+            self.__max_epoch = self.conf.training.max_epoch
 
-        if valid_data is not None:
-            group["valid_data"] = valid_data.group
-
-        if test_data is not None:
-            group["test_data"] = test_data.group
+        if self.step != 0:
+            self.__best_loss = Dataset(self.__observables["loss"].id)[self.step]
+        else:
+            self.__best_loss = np.inf
 
     @property
-    def info(self) -> LeopoldTrainingOptions:
-        return LeopoldTrainingOptions(**self.__group.__dict__)
+    def step(self) -> int:
+        return self.group.attrs.get("step", 0)
 
-    @info.setter
-    def info(self, info: LeopoldTrainingOptions) -> None:
-        for key, val in asdict(info):
-            self.__group.attrs[key] = val
+    @property
+    def model_conf(self) -> dict:
+        mconf = self.conf.model
+        info = self.get_dataset("train").info
+
+        # Take number of elements in the dataset
+        mconf["n_elems"] = len(info.species) + 1
+
+        # Set the average number of neighbours
+        mconf["n_neighbour"] = info.average_neigh
+
+        # Get energy scale and shift
+        mconf["energy_shift"] = info.averages["energy"]
+        mconf["energy_scale"] = info.deviations["energy"]
+
+        # Get species dependent scale and shift
+        vals = [info.averages["magmoms"], info.averages["charges"]]
+        mconf["magchg_shift"] = np.concat(vals, axis=1)
+
+        vals = [info.deviations["magmoms"], info.deviations["charges"]]
+        mconf["magchg_shift"] = np.concat(vals, axis=1)
+
+        return mconf
+
+    @property
+    def conf(self) -> LeopoldConfiguration:
+        # See if inputs is empty
+        if len(self.__inputs) == 0:
+            raise ValueError(
+                "tried to reference configurations of Leopold training before assigning them!"
+            )
+
+        conf = save_hdf5_to_tree(self.__inputs)
+        return LeopoldConfiguration(**conf)
+
+    @conf.setter
+    def conf(self, conf: LeopoldConfiguration) -> None:
+        save_tree_to_hdf5(self.__inputs, asdict(conf))
+
+        # Save it for future convenience
+        self.__max_epoch = conf.training.max_epoch
+
+    @property
+    def state(self) -> LeopoldState:
+        g = self.__models.require_group("last_model")
+        params = save_hdf5_to_tree(g)
+
+        g = self.__state.require_group("optax_state")
+        opt_state = save_hdf5_to_tree(g)
+
+        g = self.__observables.require_dataset(
+            "loss", shape=self.__max_epoch, dtype=np.float32
+        )
+        loss = g[self.step]
+
+        return LeopoldState(params, opt_state, loss)
+
+    @state.setter
+    def state(self, values: LeopoldState) -> None:
+        params, opt_state, loss, others = values
+
+        # Save params of last model
+        g = self.__models.require_group("last_model")
+        save_tree_to_hdf5(g, params)
+
+        # Save last state of optimizer
+        g = self.__state.require_group("optax_state")
+        save_tree_to_hdf5(g, opt_state)
+
+        # Save the loss
+        g = self.__observables.require_dataset(
+            "loss", shape=self.__max_epoch, dtype=np.float64
+        )
+        g[self.step] = loss
+
+        # Save other observables if present
+        if others is not None:
+            for key, value in others.items():
+                g = self.__observables.require_dataset(
+                    key, shape=self.__max_epoch, dtype=np.float64
+                )
+                g[self.step] = value
+
+        # Controll if loss is the best in case save best model
+        if self.__best_loss > loss:
+            g = self.__models.require_group("best_model")
+            save_tree_to_hdf5(g, params)
+
+            # Reset loss and impatience
+            self.__best_loss = loss
+            self.impatience = 0
+        else:
+            # Increase impatience
+            self.impatience += 1
+
+        # Add one to step
+        self.group.attrs["step"] = self.step + 1
+
+    def attach_dataset(
+        self, name: str, data: Union[LeopoldDataLoader, LeopoldDatasetGroup], **kwargs
+    ) -> None:
+        if isinstance(data, LeopoldDatasetGroup):
+            self.__datasets[name] = data.group
+        else:
+            g = LeopoldDatasetGroup(self.__datasets.require_group(name))
+            g.write_dataloader(data, **kwargs)
+
+    def get_dataset(self, name: str) -> LeopoldDatasetGroup:
+        g = Group(self.__datasets[name].id)
+        return LeopoldDatasetGroup(g)
+
+    def get_datasets(self) -> dict[str, LeopoldDatasetGroup]:
+        data = {}
+        for name in self.__datasets.keys():
+            data[name] = self.get_dataset(name)
+
+        return data
 
 
 # ==== ML STATE ==== #
 
 
 class LeopoldCheckpointFile(LeopoldHDF5):
-    datasets: Group
-    training: Group
-    models: Group
-
     def __init__(
         self,
         name,
@@ -289,43 +389,58 @@ class LeopoldCheckpointFile(LeopoldHDF5):
             name, mode, author_name, email, *args, **kwargs
         )
 
-        # Create dataset group
-        self.datasets = self.require_group("datasets")
-
         # Create training group with specifics
-        # TODO: possibility of adding multiple trainings?
-        self.training = self.require_group("trainings")
+        self.__trainings = self.require_group("trainings")
 
-        # Create model group with model specifics
-        self.models = self.require_group("models")
+    @property
+    def n_train(self) -> int:
+        return len(self.__trainings)
 
-    def get_datasets(self) -> dict[str, LeopoldDataLoader]:
-        data = {}
+    def create_training(self, conf: LeopoldConfiguration) -> LeopoldTrainingGroup:
+        # If no trainings are present just create the first
+        if len(self.__trainings) == 0:
+            g = LeopoldTrainingGroup(self.__trainings.create_group("training1"))
 
-        for key in self.datasets.keys():
-            data[key] = LeopoldDatasetGroup(
-                self.datasets.require_group(key)
-            ).get_dataloader()
+            # Set configuration
+            g.conf = conf
+            return g
 
-        return data
+        # See if one restarts
+        if conf.training.restart:
+            last_train = Group(self.__trainings[f"training{self.n_train}"].id)
+            last_train = LeopoldTrainingGroup(last_train)
 
-    def write_dataset(
-        self, name: str, loader: LeopoldDataLoader, save_data: bool = True
-    ) -> None:
-        g = self.datasets.require_group(name)
-        leopold_dataloader_to_hdf5(g, loader, save_data)
+            # Model specifics needs to be equal
+            for key, val in last_train.conf.model.items():
+                if key in ["averages", "deviations"]:
+                    continue
 
-    def write_model(
-        self,
-        name: str,
-        params: dict,
-    ) -> None:
-        g = self.models.require_group(name)
-        save_dictionary_to_hdf5(g, params)
+                if np.any(conf.model[key] != val):
+                    # They are not compatible create a new one
+                    g = LeopoldTrainingGroup(
+                        self.__trainings.create_group(f"training{self.n_train + 1}")
+                    )
 
-    def write_opt_state(self, name: str, state: dict) -> None:
-        g = self.training.require_group(name)
-        save_dictionary_to_hdf5(g, state)
+                    g.conf = conf
+                    return g
+
+            # Compatible return last train
+            return last_train
+        else:
+            g = LeopoldTrainingGroup(
+                self.__trainings.create_group(f"training{self.n_train + 1}")
+            )
+
+            # Set Configuration
+            g.conf = conf
+            return g
+
+    def get_training(self, which: Optional[int] = None) -> LeopoldTrainingGroup:
+        if which is None:
+            which = self.n_train
+
+        g = Group(self.__trainings[f"training{which}"].id)
+        return LeopoldTrainingGroup(g)
 
 
 # ==== H5MD FILE ==== #
@@ -382,5 +497,4 @@ class LeopoldH5MD(File):
 
 # ==== MAIN ==== #
 if __name__ == "__main__":
-    with LeopoldH5MD("test.h5", "w") as f:
-        pass
+    IrrepsLayout.as_layout("ir_mul")

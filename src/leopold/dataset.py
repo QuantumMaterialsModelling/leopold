@@ -149,20 +149,19 @@ class LeopoldDataLoader:
         if isinstance(raw_data, LeopoldData):
             self.data = raw_data
 
-            self.info = kwargs.get("info", None)
-            if self.info is None:
+            if "info" not in kwargs:
                 raise ValueError(
                     "when LeopoldData are given to data loader then info on the dataset must be given by the user (cannot infer types)"
                 )
+            self.info = kwargs["info"]
         # Real raw_data were given
         else:
             # Get kwargs
-            self.info = kwargs.get("info", None)
             scalar_labels = kwargs.get("scalar_labels", DEFAULT_SCALAR_LABELS)
-            vector_labels = kwargs.get("scalar_labels", DEFAULT_VECTOR_LABELS)
+            vector_labels = kwargs.get("vector_labels", DEFAULT_VECTOR_LABELS)
 
             # See if info was given
-            if self.info is None:
+            if "info" not in kwargs:
                 # Get the cutoff radius
                 r_cutoff = kwargs.get("r_cutoff", None)
 
@@ -170,6 +169,8 @@ class LeopoldDataLoader:
                 self.info = leopold_data_info(
                     raw_data, scalar_labels, vector_labels, r_cutoff
                 )
+            else:
+                self.info = kwargs["info"]
 
             # Get the data constructor function
             cpu_device = jax.devices("cpu")[0]
