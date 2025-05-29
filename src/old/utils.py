@@ -22,7 +22,7 @@ import tables as tb
 from jax_md import nn, space, partition
 
 # Leopold
-from leopold import model_from_config
+from old.leopold import model_from_config
 
 # ASE
 from ase.io import read

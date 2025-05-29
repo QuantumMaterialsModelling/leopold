@@ -71,7 +71,7 @@ class Labels(NamedTuple):
     forces: Array  # [.., N, 3]
     magmoms: Array  # [.., N, 1]
     charges: Array  # [.., N, 1]
-    stress: Array | None = None  # [.., N]
+    # stress: Array | None = None  # [.., N]
 
 
 @dataclass
@@ -253,7 +253,6 @@ class LeopoldDataLoader:
         beg = idx * self.batch_size
         end = beg + self.batch_size
 
-        # If Configurations are already loaded send the right one
         return self[beg:end]
 
     def __getitem__(self, idx) -> LeopoldData:
@@ -403,7 +402,7 @@ def leopold_data_info(
         k: np.asarray(v / len(neighs)) for k, v in mean_scalar.items()
     }
     deviations = {
-        k: np.sqrt(np.mean(v) - averages[k] ** 2) for k, v in std_scalar.items()
+        k: np.sqrt(v / len(neighs) - averages[k] ** 2) for k, v in std_scalar.items()
     }
 
     for k, v in mean_vector.items():

@@ -18,13 +18,21 @@ from logging import INFO
 from dataclasses import asdict, dataclass, field
 
 # Leopold model
-from leopold.nn import Leopold
+from leopold.nn.cueq_imp import Leopold
 from leopold.dataset import DEFAULT_SCALAR_LABELS, DEFAULT_VECTOR_LABELS
 
 # Typing
-from typing import Union, Optional
+from typing import Union
 
 # ==== OBJECTS ==== #
+
+
+@dataclass
+class LeopoldMDOptions:
+    checkpoint_file: str
+    temperature: int = 0
+    use_float64: bool = True
+    seed: int = 42
 
 
 @dataclass
@@ -120,7 +128,7 @@ class LeopoldConfiguration:
 
 def _get_default_hyperparams() -> dict:
     # Get dictionaty with everithing
-    model = Leopold(0).__dict__
+    model = Leopold(1).__dict__
 
     # Remove flax added stuff
     for key in model.copy().keys():

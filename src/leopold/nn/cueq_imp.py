@@ -16,7 +16,9 @@ from jax.scipy.special import erfinv
 # Flax
 import flax.linen as nn
 
-from flax.linen.initializers import Initializer
+# NN generals
+from leopold.nn.generals import MLP, BesselEmbedding
+from leopold.nn.generals import NONLINEARITY, EVEN_NONLINEARITY, ODD_NONLINEARITY
 
 # Cuequivariance
 import cuequivariance as cue
@@ -33,21 +35,6 @@ from typing import Callable
 
 # ==== UTILITIES ==== #
 
-NONLINEARITY = {
-    "none": lambda x: x,
-    "relu": nn.relu,
-    "swish": nn.swish,
-    "tanh": nn.tanh,
-    "sigmoid": nn.sigmoid,
-    "silu": nn.silu,
-    "gelu": nn.gelu,
-    "soft": lambda x: x * (1 - jnp.exp(-(x * x))),
-    "seagul": lambda x: jnp.log1p(x * x),
-}
-
-EVEN_NONLINEARITY = ["seagul"]
-ODD_NONLINEARITY = ["none", "soft", "tanh"]
-
 
 def _normalize(f: Callable[[Array], Array]) -> Callable[[Array], Array]:
     with ensure_compile_time_eval():
@@ -61,57 +48,6 @@ def _normalize(f: Callable[[Array], Array]) -> Callable[[Array], Array]:
 
 
 # ==== OBJECTS ==== #
-
-
-class MLP(nn.Module):
-    """Implementation of a general MLP in flax
-
-    Attributes:
-        dimensions: tuple with dimensions of the layers
-        gate_names: names of the linearities to use after each linear layer
-        use_biases: tell if linear layers should use biases
-        init_funct: initializer kernel functions for the weights
-    """
-
-    dimensions: tuple[int, ...]
-    gate_names: tuple[str, ...] | str
-
-    use_biases: bool = True
-    init_funct: Initializer = nn.initializers.normal()
-
-    @nn.compact
-    def __call__(self, x: Array) -> Array:
-        # See dimensionality of gates
-        if isinstance(self.gate_names, tuple):
-            # Check dimensions and gates have same number
-            if len(self.dimensions) != len(self.gate_names):
-                raise ValueError(
-                    "must have same number of dimensions and gates to construct an MLP!"
-                )
-
-            # Check all gates exist
-            for gate in self.gate_names:
-                if gate not in NONLINEARITY.keys():
-                    raise KeyError(
-                        f"non linearity {gate} does not exist, possibles are: {NONLINEARITY.keys()}!"
-                    )
-
-            layers = zip(self.dimensions, self.gate_names)
-        else:
-            # Check if wanted gate exist
-            if self.gate_names not in NONLINEARITY.keys():
-                raise KeyError(
-                    f"non linearity {self.gate_names} does not exist, possibles are: {NONLINEARITY.keys()}!"
-                )
-
-            layers = zip(self.dimensions, [self.gate_names for _ in self.dimensions])
-
-        # Perform operations
-        for d, g in layers:
-            x = nn.Dense(d, use_bias=self.use_biases, kernel_init=self.init_funct)(x)
-            x = NONLINEARITY[g](x)
-
-        return x
 
 
 class FullyConnectedTensorProduct(nn.Module):
@@ -130,7 +66,7 @@ class FullyConnectedTensorProduct(nn.Module):
         )
         w = self.param("weights", lambda x: cuex.randn(x, e.operands[0]))
 
-        return cuex.equivariant_polynomial(e, [w, x1, x2], impl="jax")  # pyright: ignore
+        return cuex.equivariant_polynomial(e, [w, x1, x2])  # pyright: ignore
 
 
 class Linear(nn.Module):
@@ -153,57 +89,7 @@ class Linear(nn.Module):
         #       inside line 72 of linear.py in e3nn
         w = self.param("weights", lambda key: cuex.randn(key, e.operands[0]))
 
-        return cuex.equivariant_polynomial(e, [w, x], impl="jax")  # pyright: ignore
-
-
-class BesselEmbedding(nn.Module):
-    """Flax module to embed a distance in a high dimensional space
-
-    Takes a distance :math:`r` and embeds it in a higher space defined by a
-    set of bessel functions :math:`[J_0(\\omega_1 r), ..., J_0(\\omega_n r)]`.
-    The different functions are then multiplied by a smooth envelope function
-    defined by a polynomial relation that smoothly sets to zeros the entries
-    given by :math:`r > r_C` with :math:`r_C` being a outer cutoff radius,
-    while the envelope is set to be equal to 1 for :math:`r < r_c` with
-    :math:`r_c` being an inner cutoff radius.
-
-    Attributes:
-        count: number of frequencies to use for the embedding
-        inner_cutoff: inner cutoff of the envelope function
-        outer_cutoff: outer cutoff of the envelope function
-    """
-
-    count: int
-    inner_cutoff: float
-    outer_cutoff: float
-
-    @nn.compact
-    def __call__(self, R: Array) -> Array:
-        # Define frequencies of Bessel functions
-        w = self.param("frequences", lambda _: jnp.arange(1, self.count + 1) * jnp.pi)
-
-        # Avoid infinities for distances that are too small
-        r = jnp.where(R > 1e-5, R, 1.0)
-
-        # Broadcast (N,) to (N, 1)
-        r = r[:, jnp.newaxis]
-
-        # Compute bessel functions
-        b = w[jnp.newaxis, :] * r
-        b = 2 * jnp.sin(b / self.outer_cutoff) / (r * self.outer_cutoff)
-
-        # Compute envelop to make them smooth
-        r2, rc, ro = r * r, self.outer_cutoff**2, self.inner_cutoff**2
-
-        envelop = jnp.where(
-            r < self.outer_cutoff,
-            (rc - r2) ** 2 * (rc + 2 * r2 - 3 * ro) / (rc - ro) ** 3,
-            0,
-        )
-        envelop = jnp.where(r < self.inner_cutoff, 1, envelop)
-
-        # Final multiplication
-        return jnp.where(R[:, jnp.newaxis] > 1e-5, b, 0) * envelop
+        return cuex.equivariant_polynomial(e, [w, x])  # pyright: ignore
 
 
 class Gate(nn.Module):
@@ -372,12 +258,27 @@ class Leopold(nn.Module):
 
     radial_mlp_layers: int = 2
     radial_mlp_hidden: int = 64
-    radial_mlp_activa: str = "swish"
+    radial_mlp_activa: str = "raw_swish"
 
-    even_gate: str = "gelu"
-    even_act: str = "sigmoid"
-    odd_gate: str = "soft"
+    even_gate: str = "raw_swish"
+    even_act: str = "raw_swish"
+    odd_gate: str = "tanh"
     odd_act: str = "tanh"
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+
+        if jnp.isscalar(self.energy_scale):
+            self.energy_scale = jnp.full((self.n_elems - 1, 1), self.energy_scale)
+
+        if jnp.isscalar(self.energy_shift):
+            self.energy_shift = jnp.full((self.n_elems - 1, 1), self.energy_shift)
+
+        if jnp.isscalar(self.magchg_scale):
+            self.magchg_scale = jnp.full((self.n_elems - 1, 2), self.magchg_scale)
+
+        if jnp.isscalar(self.magchg_shift):
+            self.magchg_shift = jnp.full((self.n_elems - 1, 2), self.magchg_shift)
 
     @nn.compact
     def __call__(self, graph: GraphsTuple):
@@ -413,6 +314,15 @@ class Leopold(nn.Module):
         # Perform convolution
         conv = Linear(target_irr)(nodes)
         for _ in range(self.n_convo):
+            # NOTE:
+            # original Leopold architecture
+            # e = cue.descriptors.fully_connected_tensor_product(
+            #     conv.irreps, dR.irreps, hidden_irr
+            # )
+
+            # NOTE:
+            # testing new more MACE-like architecture
+
             # Construct the tensor product descriptor
             e = cue.descriptors.channelwise_tensor_product(
                 conv.irreps, dR.irreps, hidden_irr
@@ -420,7 +330,7 @@ class Leopold(nn.Module):
 
             # Construct the symmetric contraction
             c = cue.descriptors.symmetric_contraction(
-                Irreps("O3", str(e.outputs[0])), hidden_irr, (1, 2, 3)
+                Irreps("O3", str(e.outputs[0])), hidden_irr, (1,)
             )
 
             # Get dimensions for MLP and non linearities
@@ -447,7 +357,6 @@ class Leopold(nn.Module):
 
             # Check no problem arised and simplify
             assert not isinstance(edge_feat, list)
-            edge_feat = edge_feat
 
             # Perform a scatter sum averaged beetween neighbours
             res = jnp.zeros((conv.shape[0], edge_feat.shape[1]))
@@ -476,30 +385,14 @@ class Leopold(nn.Module):
         magchg = Linear(Irreps("O3", "2x0e"))(magchg).array
 
         # Scale and Shift energy
-        scale = self.energy_scale
-        if jnp.isscalar(self.energy_scale):
-            scale = jnp.full((self.n_elems - 1, 1), self.energy_scale)
-
-        shift = self.energy_shift
-        if jnp.isscalar(self.energy_shift):
-            shift = jnp.full((self.n_elems - 1, 1), self.energy_shift)
-
-        scale = nodes.array[:, :-1] @ scale
-        shift = nodes.array[:, :-1] @ shift
+        scale = nodes.array[:, :-1] @ self.energy_scale
+        shift = nodes.array[:, :-1] @ self.energy_shift
 
         energy = jnp.sum(scale * energy + shift)
 
         # Scale and Shift magchg
-        scale = self.magchg_scale
-        if jnp.isscalar(self.magchg_scale):
-            scale = jnp.full((self.n_elems - 1, 2), self.magchg_scale)
-
-        shift = self.magchg_shift
-        if jnp.isscalar(self.magchg_shift):
-            shift = jnp.full((self.n_elems - 1, 2), self.magchg_shift)
-
-        scale = nodes.array[:, :-1] @ scale
-        shift = nodes.array[:, :-1] @ shift
+        scale = nodes.array[:, :-1] @ self.magchg_scale
+        shift = nodes.array[:, :-1] @ self.magchg_shift
 
         magchg = scale * magchg + shift
 

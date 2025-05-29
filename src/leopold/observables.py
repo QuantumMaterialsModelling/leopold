@@ -11,6 +11,9 @@ contact:  luca.leoni12@unibo.it
 # Partial
 from functools import partial
 
+# MATH
+import numpy as np
+
 # JAX
 import jax.numpy as jnp
 from jax import Array, vmap, value_and_grad
@@ -22,13 +25,14 @@ from jax_md.partition import NeighborList, is_sparse, neighbor_list_mask
 from jax_md.util import PyTree
 
 # Leopold
-from leopold.nn import Leopold
+from leopold.nn.cueq_imp import Leopold
+from leopold.dataset import LeopoldDataLoader
 
 # Jraph
 from jraph import GraphsTuple
 
 # Typing
-from typing import Callable, Optional
+from typing import Callable, Optional, Dict
 
 # ==== FUNCTIONS ==== #
 
@@ -90,6 +94,11 @@ def custom_to_jraph(
     )
 
 
+def _mask_self_fn(idx: Array) -> Array:
+    self_mask = idx == jnp.reshape(jnp.arange(idx.shape[0]), (idx.shape[0], 1))
+    return jnp.where(self_mask, idx.shape[0], idx)
+
+
 def leopold_graph_constructor(
     pos: Array, box: Array, r_cutoff: float
 ) -> Callable[[Array, Array, Array], GraphsTuple]:
@@ -142,3 +151,28 @@ def leopold_model(
         return model.init(key, graph)
 
     return value_and_grad(apply_fn, argnums=1, has_aux=True), init_fn
+
+
+def evaluate_model(
+    params, model: Callable, data: LeopoldDataLoader
+) -> Dict[str, float]:
+    rmse = {"energy": 0.0, "forces": 0.0, "charges": 0.0, "magmoms": 0.0}
+
+    for batch in data:
+        (energy, magchg), forces = model(params, *batch.config)
+        magmoms, charges = jnp.split(magchg, 2, axis=-1)
+
+        N = jnp.any(batch.config.ones_hot == 1, axis=-1, keepdims=True).sum(
+            -2, keepdims=True
+        )
+
+        rmse["energy"] += np.square(energy - batch.labels.energy).sum()
+        rmse["forces"] += np.sum(jnp.square(forces + batch.labels.forces) / N)
+        rmse["charges"] += np.sum(jnp.square(charges - batch.labels.charges) / N)
+        rmse["magmoms"] += np.sum(jnp.square(magmoms - batch.labels.magmoms) / N)
+
+    # perform mean and root
+    for key, val in rmse.items():
+        rmse[key] = np.sqrt(val / len(data))
+
+    return rmse

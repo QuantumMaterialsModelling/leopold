@@ -8,10 +8,14 @@ contact:  luca.leoni12@unibo.it
 
 # ==== IMPORTS ==== #
 
+# MATH
+import numpy as np
+
 # JAX
 import jax
 import jax.numpy as jnp
 import jax.random as jrn
+import jax.tree_util as tree
 from jax import jit, vmap, value_and_grad
 
 # Logging
@@ -26,9 +30,9 @@ import os
 import yaml
 
 # Leopold
-from leopold.dataset import leopold_load_datasets, LeopoldData
+from leopold.dataset import leopold_load_datasets, Configuration, Labels
 from leopold.config import read_leopold_configuration, LeopoldConfiguration
-from leopold.observables import leopold_model
+from leopold.observables import leopold_model, evaluate_model
 from leopold.hdf5 import LeopoldCheckpointFile, LeopoldState
 from leopold import __version__
 
@@ -40,6 +44,9 @@ from argparse import ArgumentParser, Namespace
 
 # Dataclass
 from dataclasses import asdict
+
+# PreattyTables
+from prettytable import PrettyTable
 
 # Typing
 from typing import Union, Optional
@@ -162,7 +169,7 @@ def main():
     os.makedirs(gconf.models_dir, exist_ok=True)
 
     fcheck = os.path.join(gconf.models_dir, gconf.checkpoint_file)
-    if os.path.isfile(fcheck):
+    if os.path.isfile(fcheck) and tconf.restart:
         fcheck = LeopoldCheckpointFile(fcheck, "a")
     else:
         fcheck = LeopoldCheckpointFile(fcheck, "w")
@@ -171,10 +178,10 @@ def main():
     gtrain = fcheck.create_training(conf)
 
     # ---- DATASET
-    logger.info("Reading dataset")
 
     # if data_paths is empty read from HDF5
     if len(dconf.data_paths) == 0:
+        logger.info("Reading dataset from checkpoint")
         data = gtrain.get_datasets()
 
         # See if training exist
@@ -188,6 +195,8 @@ def main():
 
     # Read from configuration
     else:
+        logger.info("Reading dataset from given paths")
+
         # See if training exist
         if "train" not in dconf.data_paths:
             raise KeyError("a traing dataset must be given inside the configuration!")
@@ -220,6 +229,16 @@ def main():
         logger.info(f"\t-{key}: {len(loader)} configurations")
 
     # Tell about other quantities
+    info = data["train"].info
+    logger.info(
+        f"Using following energy per atom scale and shift: {data['train'].info.deviations['energy']:.2f} {data['train'].info.averages['energy']:.2f}"
+    )
+    for key in ["magmoms", "charges"]:
+        logger.info(
+            f"Using following species dependent values for {key} scale and shift:"
+        )
+        for s, m, d in zip(info.species, info.averages[key], info.deviations[key]):
+            logger.info(f"\t*{s:<2d} -> {d} {m}")
     logger.info(
         f"Average number of neighbours in dataset: {data['train'].info.average_neigh:.2f}"
     )
@@ -228,11 +247,16 @@ def main():
     logger.info("Constructing model")
 
     # Construct the model
-    example_data = data["train"][data["train"].info.max_neigh_idx]
-    model, init = leopold_model(gtrain.model_conf, *example_data.config)
+    example_data = data["train"][data["train"].info.max_neigh_idx].config
+    apply_fn, init_fn = leopold_model(
+        gtrain.model_conf,
+        example_data.positions,
+        example_data.ones_hot,
+        example_data.box,
+    )
 
     # Jit the function
-    comp_vect_model = jit(vmap(model, (None, 0, 0, 0)))
+    comp_vect_model = jit(vmap(apply_fn, (None, 0, 0, 0)))
 
     # Construct the optimizer
     opt = optax.chain(
@@ -243,15 +267,29 @@ def main():
     )
 
     # ---- INITIALIZATION
-    if tconf.restart:
-        params, opt_state, _, _ = gtrain.state
-    else:
-        # Initialize model
-        key = jrn.PRNGKey(conf.general.seed)
-        params = init(key)
+    # Initialize model
+    key = jrn.PRNGKey(conf.general.seed)
+    params = init_fn(key)
 
-        # Initialize Optimizer
-        opt_state = opt.init(params)
+    # Initialize Optimizer
+    opt_state = opt.init(params)
+
+    # Load state if restarted
+    if tconf.restart and gtrain.step != 0:
+        logger.info(f"Restarting from existing training at step {gtrain.step}")
+
+        # Get params and optimizer state
+        params, opt_state, _, _ = gtrain.load_state(LeopoldState(params, opt_state, 0))
+    # If restarted anew load only model
+    elif tconf.restart and fcheck.n_train > 1:
+        logger.info("Reading best model from previous existing checkpoint")
+
+        params = gtrain.load_model(params, "best")
+        params = tree.tree_map(lambda x: jax.device_put(x, device), params)
+
+    # Give information on total number of parameters
+    nparams = np.sum([np.prod(arr.shape) for arr in tree.tree_leaves(params)])
+    logger.info(f"Total number of parameters in model {nparams}")
 
     # ---- LOSS DEFINITION
 
@@ -261,19 +299,19 @@ def main():
     tconf.charge_weight *= data["train"][0].config.ones_hot.shape[-2] ** 2
 
     @jit
-    def loss_fn(params, batch: LeopoldData):
-        (energy, magchg), forces = comp_vect_model(params, *batch.config)
-
-        magmom, charge = jnp.split(magchg, 2, -1)
+    def loss_fn(params, conf: Configuration, labels: Labels):
+        (energy, magchg), forces = comp_vect_model(
+            params, conf.positions, conf.ones_hot, conf.box
+        )
 
         # Loss of all observables
-        e_loss = jnp.square(energy - batch.labels.energy).mean()
-        f_loss = jnp.square(forces + batch.labels.forces).mean()
-        m_loss = jnp.square(magmom - batch.labels.magmoms).mean()
-        c_loss = jnp.square(charge - batch.labels.charges).mean()
+        e_loss = jnp.square(energy - labels.energy).mean()
+        f_loss = jnp.square(forces + labels.forces).mean()
+        m_loss = jnp.square(magchg[..., 0] - labels.magmoms).mean()
+        c_loss = jnp.square(magchg[..., 1] - labels.charges).mean()
 
         # Sum of all magnetizations
-        s_loss = jnp.square(magmom.sum(-1) - batch.labels.magmoms.sum(-1)).mean()
+        s_loss = jnp.square(magchg[..., 0].sum(-1) - labels.magmoms.sum(-1)).mean()
 
         loss = (
             tconf.energy_weight * e_loss
@@ -287,10 +325,10 @@ def main():
 
     # ---- UPDATE DEFINITION
     @jit
-    def update(params, opt_state, batch: LeopoldData):
+    def update_fn(params, opt_state, conf: Configuration, labels: Labels):
         grad_fn = value_and_grad(loss_fn, has_aux=True)
 
-        (loss, aux), params_grad = grad_fn(params, batch)
+        (loss, aux), params_grad = grad_fn(params, conf, labels)
 
         updates, opt_state = opt.update(
             params_grad, opt_state, params, value=jnp.float32(loss)
@@ -306,7 +344,7 @@ def main():
     logger.info("Starting training")
 
     logger.info(
-        f"{'Total':>35s} {'Energy':>11s} {'Forces':>12s} {'Magmoms':>12s} {'Charges':>12s} {'Magmom Sum':>12s}  {'Total':>27s} {'Energy':>11s} {'Forces':>12s} {'Toccup':>12s} {'Magmom Sum':>12s} | {'Learning rate':>12s}"
+        f"{'Total':>35s} {'Energy':>11s} {'Forces':>12s} {'Magmoms':>12s} {'Charges':>12s} {'Magmom Sum':>12s}  {'Total':>27s} {'Energy':>11s} {'Forces':>12s} {'Magmoms':>12s} {'Charges':>12s} {'Magmom Sum':>12s} | {'Learning rate':>12s}"
     )
 
     for i in range(gtrain.step, tconf.max_epoch):
@@ -316,15 +354,18 @@ def main():
 
         # Train loop and loss
         train_loss = {
-            "total": jnp.array([]),
-            "energy": jnp.array([]),
-            "forces": jnp.array([]),
-            "magmom": jnp.array([]),
-            "charge": jnp.array([]),
-            "magsum": jnp.array([]),
+            "total": jnp.zeros(len(data["train"])),
+            "energy": jnp.zeros(len(data["train"])),
+            "forces": jnp.zeros(len(data["train"])),
+            "magmom": jnp.zeros(len(data["train"])),
+            "charge": jnp.zeros(len(data["train"])),
+            "magsum": jnp.zeros(len(data["train"])),
         }
+
         for batch in data["train"]:
-            params, opt_state, losses = update(params, opt_state, batch)
+            params, opt_state, losses = update_fn(
+                params, opt_state, batch.config, batch.labels
+            )
 
             for key, loss in zip(train_loss.keys(), losses):
                 train_loss[key] = jnp.append(train_loss[key], loss)
@@ -342,7 +383,7 @@ def main():
             "magsum": jnp.array([]),
         }
         for batch in data["validation"]:
-            losses = loss_fn(params, batch)
+            losses = loss_fn(params, *batch)
 
             # Flatten the tuple
             losses = (losses[0], *losses[1])
@@ -364,7 +405,29 @@ def main():
         )
 
         # Saving State
-        gtrain.state = LeopoldState(params, opt_state, float(valid_loss["total"]))
+        gtrain.update_state(LeopoldState(params, opt_state, float(valid_loss["total"])))
+
+    # ---- FINAL EVALUATION
+    logger.info("Finished training, evaluating model...")
+
+    # Get best model
+    params = gtrain.load_model(params, "best")
+    params = tree.tree_map(lambda x: jax.device_put(x, device), params)
+
+    # Collect results
+    table = PrettyTable(
+        ["", "energy (meV)", "forces (meV/A)", "charges (me)", "magmoms (mµ)"]
+    )
+
+    # Evaluate the model
+    for name in data.keys():
+        vals = evaluate_model(params, comp_vect_model, data[name])
+        vals = [v * 1e3 for v in vals.values()]
+        vals = [name] + vals
+        table.add_row(vals)
+
+    # Print it
+    logger.info(table)
 
 
 if __name__ == "__main__":

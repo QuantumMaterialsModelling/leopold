@@ -201,7 +201,8 @@ def model_from_config(cfg: ConfigDict) -> NequIPEnergyModel:
     if hasattr(cfg, "scale") and hasattr(cfg, "shift"):
         scale, shift = cfg.scale, cfg.shift
     else:
-        raise ValueError
+        scale, shift = 0.0, 1.0
+        # raise ValueError
 
     model = NequIPEnergyModel(
         graph_net_steps=cfg.graph_net_steps,
@@ -217,8 +218,8 @@ def model_from_config(cfg: ConfigDict) -> NequIPEnergyModel:
         radial_net_n_layers=cfg.radial_net_n_layers,
         shift=shift,
         scale=scale,
-        shift_occ=cfg.shift_occ,
-        scale_occ=cfg.scale_occ,
+        shift_occ=jnp.array([[0.0], [0.0]]),
+        scale_occ=jnp.array([[1.0], 1.0]),
         n_neighbors=cfg.n_neighbors,
         scalar_mlp_std=cfg.scalar_mlp_std,
         learn_energy=cfg.get("learn_energy", False),

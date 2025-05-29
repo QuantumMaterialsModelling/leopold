@@ -19,14 +19,19 @@ from jax import vmap, jit, value_and_grad, tree_util
 import optax
 
 # Utils
-from utils import get_data_from_xyz, shuffle_data, get_all, batch_data, split_data
-from utils import get_model, evaluate_model, get_average_num_neighbour, apply_transform
+from old.utils import get_data_from_xyz, shuffle_data, get_all, batch_data, split_data
+from old.utils import (
+    get_model,
+    evaluate_model,
+    get_average_num_neighbour,
+    apply_transform,
+)
 
 # Types
 from ml_collections import ConfigDict
 from argparse import ArgumentParser, Namespace
 from typing import Union, Optional
-from utils import AtomsData
+from old.utils import AtomsData
 
 
 # ---- HELPER FUNCTIONS
