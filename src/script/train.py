@@ -303,15 +303,16 @@ def main():
         (energy, magchg), forces = comp_vect_model(
             params, conf.positions, conf.ones_hot, conf.box
         )
+        magmom, charge = jnp.split(magchg, 2, axis=-1)
 
         # Loss of all observables
         e_loss = jnp.square(energy - labels.energy).mean()
         f_loss = jnp.square(forces + labels.forces).mean()
-        m_loss = jnp.square(magchg[..., 0] - labels.magmoms).mean()
-        c_loss = jnp.square(magchg[..., 1] - labels.charges).mean()
+        m_loss = jnp.square(magmom - labels.magmoms).mean()
+        c_loss = jnp.square(charge - labels.charges).mean()
 
         # Sum of all magnetizations
-        s_loss = jnp.square(magchg[..., 0].sum(-1) - labels.magmoms.sum(-1)).mean()
+        s_loss = jnp.square(magmom.sum(1) - labels.magmoms.sum(1)).mean()
 
         loss = (
             tconf.energy_weight * e_loss

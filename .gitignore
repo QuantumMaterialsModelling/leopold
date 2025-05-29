@@ -10,6 +10,7 @@ train-tio/*
 
 logs/*
 results/*
+build/*
 
 
 data.xyz
