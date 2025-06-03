@@ -23,6 +23,7 @@ from jax.tree_util import tree_map
 from jax_md import space, partition
 from jax_md.partition import NeighborList, is_sparse, neighbor_list_mask
 from jax_md.util import PyTree
+from jax_md.nn import util
 
 # Leopold
 from leopold.nn.cueq_imp import Leopold

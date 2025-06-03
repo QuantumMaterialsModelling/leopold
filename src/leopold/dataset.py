@@ -15,13 +15,16 @@ from numpy.typing import NDArray
 # ASE
 from ase import Atoms
 from ase.io import read as ase_read
-from ase.neighborlist import neighbor_list
 
 # JAX
 import jax
 import jax.random as jrn
 import jax.numpy as jnp
-from jax import Array, Device
+from jax import Array, Device, vmap
+from jax.typing import ArrayLike
+
+# JAX_MD
+from jax_md.space import periodic_general
 
 # DATACLASS
 from dataclasses import dataclass
@@ -175,7 +178,7 @@ class LeopoldDataLoader:
             # Get the data constructor function
             cpu_device = jax.devices("cpu")[0]
             f = leopold_data_constructor(
-                self.info, scalar_labels, vector_labels, cpu_device
+                self.info, scalar_labels, vector_labels, self.device
             )
 
             # Preload the data in batches
@@ -259,11 +262,8 @@ class LeopoldDataLoader:
         conf = self.data.config._asdict()
         labe = self.data.labels._asdict()
 
-        new_conf = {k: jax.device_put(v[idx], self.device) for k, v in conf.items()}
-        new_labe = {
-            k: jax.device_put(v[idx], self.device) if v is not None else None
-            for k, v in labe.items()
-        }
+        new_conf = {k: v[idx] for k, v in conf.items()}
+        new_labe = {k: v[idx] if v is not None else None for k, v in labe.items()}
 
         return LeopoldData(Configuration(**new_conf), Labels(**new_labe))  # pyright: ignore
 
@@ -313,6 +313,16 @@ def read(
 
 
 # ==== INFO FUNCTIONS ==== #
+
+
+def _get_average_num_neighbour(cell: ArrayLike, positions: ArrayLike, r_max) -> float:
+    c, p = jnp.asarray(cell), jnp.asarray(positions)
+    distance, _ = periodic_general(c)
+
+    dist_matrix = vmap(vmap(distance, (None, 0)), (0, None))(p, p)
+    dist_matrix = jnp.linalg.norm(dist_matrix, axis=-1)
+
+    return (dist_matrix < r_max).sum() - len(p)
 
 
 def leopold_data_info(
@@ -389,8 +399,11 @@ def leopold_data_info(
 
         # Neighbour analysis
         if r_cutoff is not None:
-            neigh = np.unique(neighbor_list("i", atoms, r_cutoff), return_counts=True)
-            neighs.append(np.sum(neigh[1]))
+            neighs.append(
+                _get_average_num_neighbour(
+                    atoms.cell.array, atoms.get_scaled_positions(), r_cutoff
+                )
+            )
 
     # ---- Analysis
 
@@ -522,10 +535,10 @@ def leopold_data_constructor(
 
         # Load on GPU memory
         confs = Configuration(
-            **{key: jnp.asarray(value, device=device) for key, value in confs.items()}
+            **{key: jnp.array(value, device=device) for key, value in confs.items()}
         )
         labels = Labels(
-            **{key: jnp.asarray(value, device=device) for key, value in labels.items()}
+            **{key: jnp.array(value, device=device) for key, value in labels.items()}
         )
 
         return LeopoldData(confs, labels)
@@ -541,7 +554,7 @@ def leopold_load_datasets(
     labels: dict[str, dict] | None = None,
     share_info: bool = True,
     batch_size: int = 1,
-    device: Device = jax.devices("cuda")[0],
+    device: Device = jax.devices("cpu")[0],
     shuffle: bool = False,
     r_cutoff: Optional[float] = None,
 ) -> dict[str, LeopoldDataLoader]:

@@ -21,6 +21,10 @@ from h5py import File, Group, Dataset
 from cuequivariance import Irrep, IrrepsLayout, Irreps
 from cuequivariance_jax import RepArray
 
+# e3nn
+import e3nn_jax as e3
+from e3nn_jax import IrrepsArray
+
 # Jax
 import jax
 import jax.numpy as jnp
@@ -68,6 +72,17 @@ def _restore_reparr(_: RepArray, x: Dict[str, Any]) -> RepArray:
 
 
 register_serialization_state(RepArray, _reparr_state_dict, _restore_reparr)
+
+
+def _irreparr_state_dict(x: IrrepsArray) -> Dict[str, Any]:
+    return {"irreps": str(x.irreps), "array": x.array}
+
+
+def _restore_irreparr(_: IrrepsArray, x: Dict[str, Any]) -> IrrepsArray:
+    return IrrepsArray(e3.Irreps(x["irreps"]), x["array"])
+
+
+register_serialization_state(IrrepsArray, _irreparr_state_dict, _restore_irreparr)
 
 # ==== FUNCTIONS ==== #
 

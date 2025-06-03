@@ -265,6 +265,8 @@ class Leopold(nn.Module):
     odd_gate: str = "tanh"
     odd_act: str = "tanh"
 
+    self_connection: bool = False
+
     def __post_init__(self) -> None:
         super().__post_init__()
 
@@ -293,7 +295,7 @@ class Leopold(nn.Module):
         hidden_irr += vector_irr
 
         # Get edges
-        dR = jnp.asarray(graph.edges)
+        dR = graph.edges
         R = jnp.linalg.norm(dR, axis=-1)
 
         # Transform edges in RepArray
@@ -304,12 +306,9 @@ class Leopold(nn.Module):
         R = BesselEmbedding(self.n_basis, self.r_cutoff - 0.5, self.r_cutoff)(R)
 
         # Transform nodes in Rep Array
-        nodes = jnp.asarray(graph.nodes)
-        nodes = cuex.RepArray(cue.Irreps("O3", f"{self.n_elems}x0e"), nodes, cue.ir_mul)
-
-        # Take senders and recievers
-        sender = jnp.asarray(graph.senders)
-        reciev = jnp.asarray(graph.receivers)
+        nodes = cuex.RepArray(
+            cue.Irreps("O3", f"{self.n_elems}x0e"), graph.nodes, cue.ir_mul
+        )
 
         # Perform convolution
         conv = Linear(target_irr)(nodes)
@@ -343,29 +342,29 @@ class Leopold(nn.Module):
             conv = Linear(conv.irreps)(conv)
 
             # Create the self connection
-            self_conn = FullyConnectedTensorProduct(
-                hidden_irr,
-            )(conv, nodes)
+            if self.self_connection:
+                self_conn = FullyConnectedTensorProduct(
+                    hidden_irr,
+                )(conv, nodes)
 
             # Get weights and perform convolution
-            w = MLP(mlp_dime, mlp_gate, False)(R)
-            edge_feat = cuex.equivariant_polynomial(e, [w, conv[sender], dR])
-            assert not isinstance(edge_feat, list)
-
-            w = MLP(mlp_dimc, mlp_gate, False)(R)
-            edge_feat = cuex.equivariant_polynomial(c, [w, edge_feat])
-
-            # Check no problem arised and simplify
-            assert not isinstance(edge_feat, list)
+            edge_feat = cuex.equivariant_polynomial(
+                e, [MLP(mlp_dime, mlp_gate, False)(R), conv[graph.senders], dR]
+            )
+            edge_feat = cuex.equivariant_polynomial(
+                c, [MLP(mlp_dimc, mlp_gate, False)(R), edge_feat]
+            )
 
             # Perform a scatter sum averaged beetween neighbours
             res = jnp.zeros((conv.shape[0], edge_feat.shape[1]))
-            res = res.at[reciev].add(edge_feat.array) / self.n_neighbour
+            res = res.at[graph.receivers].add(edge_feat.array) / self.n_neighbour
 
             conv = cuex.RepArray(edge_feat.irreps, res, cue.ir_mul)
 
             # Second linear layer and self connection
-            conv = Linear(conv.irreps)(conv) + self_conn
+            conv = Linear(conv.irreps)(conv)
+            if self.self_connection:
+                conv = conv + self_conn
 
             # Gate the convolution results
             conv = Gate(self.even_gate, self.even_act, self.odd_gate, self.odd_act)(

@@ -9,6 +9,7 @@ contact:  luca.leoni12@unibo.it
 # ==== DEPENDENCIES ==== #
 
 # Math
+from jax import tree_util
 import jax.numpy as jnp
 
 # Flax
@@ -17,6 +18,7 @@ import flax.linen as nn
 # NN generals
 from leopold.nn.generals import BesselEmbedding
 from jax_md.nn import nequip
+# from jax_md._nn.util import BesselEmbedding
 
 # e3nn
 from e3nn_jax import Irreps, IrrepsArray
@@ -24,6 +26,7 @@ from e3nn_jax import spherical_harmonics
 
 # Typing
 from jax.typing import ArrayLike
+from jraph import segment_sum
 
 
 # ==== OBJECTS ==== #
@@ -80,8 +83,12 @@ class Leopold(nn.Module):
     odd_gate: str = "tanh"
     odd_act: str = "tanh"
 
+    self_connection: bool = False
+
     @nn.compact
     def __call__(self, graph):
+        r_cutoff = jnp.float32(self.r_cutoff)
+
         # Set non linearities
         non_lin = {"e": self.even_act, "o": self.odd_act}
 
@@ -92,12 +99,9 @@ class Leopold(nn.Module):
         dR = jnp.asarray(graph.edges)
         R = jnp.linalg.norm(dR, axis=-1)
 
-        # Transform edges in RepArray
-        dR = IrrepsArray(Irreps("1e"), dR)
-
         # Embed edges
-        dR = spherical_harmonics([i for i in range(self.n_harmo + 1)], dR, True)
-        R = BesselEmbedding(self.n_basis, self.r_cutoff - 0.5, self.r_cutoff)(R)
+        dR_sh = spherical_harmonics(Irreps("1x0e + 1x1e"), dR, True)
+        R = BesselEmbedding(self.n_basis, r_cutoff - 0.5, r_cutoff)(R)
 
         # Take senders and recievers
         sender = jnp.asarray(graph.senders)
@@ -111,7 +115,7 @@ class Leopold(nn.Module):
         for _ in range(self.n_convo):
             conv = nequip.NequIPConvolution(
                 hidden_irreps=hidden_irr,
-                use_sc=True,
+                use_sc=self.self_connection,
                 nonlinearities=non_lin,
                 radial_net_nonlinearity=self.radial_mlp_activa,
                 radial_net_n_hidden=self.radial_mlp_hidden,
@@ -119,7 +123,7 @@ class Leopold(nn.Module):
                 num_basis=self.n_basis,
                 n_neighbors=self.n_neighbour,
                 scalar_mlp_std=self.scalar_mlp_std,
-            )(conv, nodes, dR, sender, reciev, R)
+            )(conv, nodes, dR_sh, sender, reciev, R)
 
         # Get final layers
         second_irreps = conv.irreps.filter(keep=Irreps("0e")).dim // 2

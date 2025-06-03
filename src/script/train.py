@@ -45,6 +45,9 @@ from argparse import ArgumentParser, Namespace
 # Dataclass
 from dataclasses import asdict
 
+# TQDM
+from tqdm import tqdm
+
 # PreattyTables
 from prettytable import PrettyTable
 
@@ -324,11 +327,11 @@ def main():
 
         return loss, (e_loss, f_loss, m_loss, c_loss, s_loss)
 
+    grad_fn = value_and_grad(loss_fn, has_aux=True)
+
     # ---- UPDATE DEFINITION
     @jit
     def update_fn(params, opt_state, conf: Configuration, labels: Labels):
-        grad_fn = value_and_grad(loss_fn, has_aux=True)
-
         (loss, aux), params_grad = grad_fn(params, conf, labels)
 
         updates, opt_state = opt.update(
@@ -355,45 +358,45 @@ def main():
 
         # Train loop and loss
         train_loss = {
-            "total": jnp.zeros(len(data["train"])),
-            "energy": jnp.zeros(len(data["train"])),
-            "forces": jnp.zeros(len(data["train"])),
-            "magmom": jnp.zeros(len(data["train"])),
-            "charge": jnp.zeros(len(data["train"])),
-            "magsum": jnp.zeros(len(data["train"])),
+            "total": 0.0,
+            "energy": 0.0,
+            "forces": 0.0,
+            "magmom": 0.0,
+            "charge": 0.0,
+            "magsum": 0.0,
         }
 
-        for batch in data["train"]:
+        for batch in tqdm(data["train"]):
             params, opt_state, losses = update_fn(
                 params, opt_state, batch.config, batch.labels
             )
 
             for key, loss in zip(train_loss.keys(), losses):
-                train_loss[key] = jnp.append(train_loss[key], loss)
+                train_loss[key] += loss
 
         for key in train_loss.keys():
-            train_loss[key] = train_loss[key].mean()
+            train_loss[key] /= len(data["train"])
 
         # Validation loss
         valid_loss = {
-            "total": jnp.array([]),
-            "energy": jnp.array([]),
-            "forces": jnp.array([]),
-            "magmom": jnp.array([]),
-            "charge": jnp.array([]),
-            "magsum": jnp.array([]),
+            "total": 0.0,
+            "energy": 0.0,
+            "forces": 0.0,
+            "magmom": 0.0,
+            "charge": 0.0,
+            "magsum": 0.0,
         }
-        for batch in data["validation"]:
+        for batch in tqdm(data["validation"]):
             losses = loss_fn(params, *batch)
 
             # Flatten the tuple
             losses = (losses[0], *losses[1])
 
             for key, loss in zip(valid_loss.keys(), losses):
-                valid_loss[key] = jnp.append(valid_loss[key], loss)
+                valid_loss[key] += loss
 
         for key in valid_loss.keys():
-            valid_loss[key] = valid_loss[key].mean()
+            valid_loss[key] /= len(data["validation"])
 
         # Loss logger
         train_log, valid_log = "", ""
