@@ -23,10 +23,10 @@ from jax.tree_util import tree_map
 from jax_md import space, partition
 from jax_md.partition import NeighborList, is_sparse, neighbor_list_mask
 from jax_md.util import PyTree
-from jax_md.nn import util
 
 # Leopold
-from leopold.nn.cueq_imp import Leopold
+from leopold.nn.cueq_imp import Leopold as leo_cueq
+from leopold.nn.e3nn_imp import Leopold as leo_e3nn
 from leopold.dataset import LeopoldDataLoader
 
 # Jraph
@@ -140,8 +140,12 @@ def leopold_graph_constructor(
 def leopold_model(
     conf: dict, example_pos: Array, example_elem: Array, example_box: Array
 ):
+    # Get the model type
+    impl = conf.pop("implementation", "e3nn")
+
+    # Construct model and featurizer
     f = leopold_graph_constructor(example_pos, example_box, conf["r_cutoff"])
-    model = Leopold(**conf)
+    model = leo_e3nn(**conf) if impl == "e3nn" else leo_cueq(**conf)
 
     def apply_fn(param, pos, elem, box):
         graph = f(pos, elem, box)

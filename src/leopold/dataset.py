@@ -70,11 +70,11 @@ class Labels(NamedTuple):
         stress: stress applied to the configuration
     """
 
-    energy: Array  # [..,]
-    forces: Array  # [.., N, 3]
-    magmoms: Array  # [.., N, 1]
-    charges: Array  # [.., N, 1]
-    # stress: Array | None = None  # [.., N]
+    energy: Optional[Array] = None  # [..,]
+    forces: Optional[Array] = None  # [.., N, 3]
+    magmoms: Optional[Array] = None  # [.., N, 1]
+    charges: Optional[Array] = None  # [.., N, 1]
+    # stress: Optional[Array] = None  # [.., N]
 
 
 @dataclass
@@ -150,13 +150,17 @@ class LeopoldDataLoader:
 
         # If LeopoldData are directly given simply accept them
         if isinstance(raw_data, LeopoldData):
-            self.data = raw_data
+            # Make so that data is on device
+            self.data = jax.tree_util.tree_map(
+                lambda x: jax.device_put(x, self.device), raw_data
+            )
 
             if "info" not in kwargs:
                 raise ValueError(
                     "when LeopoldData are given to data loader then info on the dataset must be given by the user (cannot infer types)"
                 )
             self.info = kwargs["info"]
+
         # Real raw_data were given
         else:
             # Get kwargs
@@ -176,7 +180,6 @@ class LeopoldDataLoader:
                 self.info = kwargs["info"]
 
             # Get the data constructor function
-            cpu_device = jax.devices("cpu")[0]
             f = leopold_data_constructor(
                 self.info, scalar_labels, vector_labels, self.device
             )
@@ -275,7 +278,10 @@ class LeopoldDataLoader:
 
 
 def read(
-    path: str, scalar_labels: dict[str, str], vector_labels: dict[str, str]
+    path: str,
+    scalar_labels: dict[str, str],
+    vector_labels: dict[str, str],
+    idxs: str = ":",
 ) -> list[Atoms]:
     """Custom data reader
 
@@ -291,22 +297,24 @@ def read(
     Returns:
         list of ASE Atoms
     """
-    data = ase_read(path, index=":", format="extxyz")
+    data = ase_read(path, index=idxs, format="extxyz")
     if not isinstance(data, list):
         data = [data]
 
     # Rearrange some entries
     for atoms in data:
-        if scalar_labels["energy"] == "energy":
+        if scalar_labels.get("energy", None) == "energy":
             atoms.info["energy"] = atoms.get_potential_energy()
 
-        if vector_labels["forces"] == "forces":
+        if vector_labels.get("forces", None) == "forces":
             atoms.arrays["forces"] = atoms.get_forces()
 
-        magmom_label = vector_labels["magmoms"]
-        charge_label = vector_labels["charges"]
-        if atoms.arrays[magmom_label].ndim == 1:
+        magmom_label = vector_labels.get("magmoms", None)
+        charge_label = vector_labels.get("charges", None)
+
+        if magmom_label is not None and atoms.arrays[magmom_label].ndim == 1:
             atoms.arrays[magmom_label] = atoms.arrays[magmom_label][:, np.newaxis]
+        if charge_label is not None and atoms.arrays[charge_label].ndim == 1:
             atoms.arrays[charge_label] = atoms.arrays[charge_label][:, np.newaxis]
 
     return data

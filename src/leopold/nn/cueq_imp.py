@@ -299,24 +299,27 @@ class Leopold(nn.Module):
         R = jnp.linalg.norm(dR, axis=-1)
 
         # Transform edges in RepArray
-        dR = cuex.RepArray(cue.Irreps("O3", "1e"), dR, cue.ir_mul)
+        dR = cuex.RepArray(cue.Irreps("O3", "1e"), jnp.asarray(dR), cue.ir_mul)
 
         # Embed edges
         dR = cuex.spherical_harmonics([i for i in range(self.n_harmo + 1)], dR)
         R = BesselEmbedding(self.n_basis, self.r_cutoff - 0.5, self.r_cutoff)(R)
 
         # Transform nodes in Rep Array
-        nodes = cuex.RepArray(
-            cue.Irreps("O3", f"{self.n_elems}x0e"), graph.nodes, cue.ir_mul
-        )
+        nodes = jnp.asarray(graph.nodes)
+        nodes = cuex.RepArray(cue.Irreps("O3", f"{self.n_elems}x0e"), nodes, cue.ir_mul)
 
         # Perform convolution
         conv = Linear(target_irr)(nodes)
         for _ in range(self.n_convo):
             # NOTE:
             # original Leopold architecture
-            # e = cue.descriptors.fully_connected_tensor_product(
-            #     conv.irreps, dR.irreps, hidden_irr
+            # e = (
+            #     cue.descriptors.fully_connected_tensor_product(
+            #         conv.irreps, dR.irreps, hidden_irr
+            #     )
+            #     .flatten_coefficient_modes()
+            #     .squeeze_modes()
             # )
 
             # NOTE:
@@ -354,6 +357,7 @@ class Leopold(nn.Module):
             edge_feat = cuex.equivariant_polynomial(
                 c, [MLP(mlp_dimc, mlp_gate, False)(R), edge_feat]
             )
+            assert not isinstance(edge_feat, list)
 
             # Perform a scatter sum averaged beetween neighbours
             res = jnp.zeros((conv.shape[0], edge_feat.shape[1]))

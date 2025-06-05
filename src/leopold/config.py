@@ -18,7 +18,7 @@ from logging import INFO
 from dataclasses import asdict, dataclass, field
 
 # Leopold model
-from leopold.nn.cueq_imp import Leopold
+from leopold.nn.e3nn_imp import Leopold
 from leopold.dataset import DEFAULT_SCALAR_LABELS, DEFAULT_VECTOR_LABELS
 
 # Typing

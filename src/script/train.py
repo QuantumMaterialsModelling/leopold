@@ -8,6 +8,8 @@ contact:  luca.leoni12@unibo.it
 
 # ==== IMPORTS ==== #
 
+from tqdm import tqdm
+
 # MATH
 import numpy as np
 
@@ -30,7 +32,7 @@ import os
 import yaml
 
 # Leopold
-from leopold.dataset import leopold_load_datasets, Configuration, Labels
+from leopold.dataset import LeopoldData, leopold_load_datasets, Configuration, Labels
 from leopold.config import read_leopold_configuration, LeopoldConfiguration
 from leopold.observables import leopold_model, evaluate_model
 from leopold.hdf5 import LeopoldCheckpointFile, LeopoldState
@@ -44,9 +46,6 @@ from argparse import ArgumentParser, Namespace
 
 # Dataclass
 from dataclasses import asdict
-
-# TQDM
-from tqdm import tqdm
 
 # PreattyTables
 from prettytable import PrettyTable
@@ -158,6 +157,7 @@ def main():
     tconf = conf.training
 
     # ---- SETUP
+
     # Set the logger
     logger = setup_logger(gconf.logs_lev, gconf.tag, gconf.logs_dir)
 
@@ -303,9 +303,7 @@ def main():
 
     @jit
     def loss_fn(params, conf: Configuration, labels: Labels):
-        (energy, magchg), forces = comp_vect_model(
-            params, conf.positions, conf.ones_hot, conf.box
-        )
+        (energy, magchg), forces = comp_vect_model(params, *conf)
         magmom, charge = jnp.split(magchg, 2, axis=-1)
 
         # Loss of all observables
@@ -331,8 +329,8 @@ def main():
 
     # ---- UPDATE DEFINITION
     @jit
-    def update_fn(params, opt_state, conf: Configuration, labels: Labels):
-        (loss, aux), params_grad = grad_fn(params, conf, labels)
+    def update_fn(params, opt_state, data: LeopoldData):
+        (loss, aux), params_grad = grad_fn(params, *data)
 
         updates, opt_state = opt.update(
             params_grad, opt_state, params, value=jnp.float32(loss)
@@ -367,9 +365,7 @@ def main():
         }
 
         for batch in tqdm(data["train"]):
-            params, opt_state, losses = update_fn(
-                params, opt_state, batch.config, batch.labels
-            )
+            params, opt_state, losses = update_fn(params, opt_state, batch)
 
             for key, loss in zip(train_loss.keys(), losses):
                 train_loss[key] += loss

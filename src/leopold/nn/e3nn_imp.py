@@ -76,7 +76,6 @@ class Leopold(nn.Module):
     radial_mlp_layers: int = 2
     radial_mlp_hidden: int = 64
     radial_mlp_activa: str = "raw_swish"
-    scalar_mlp_std: float = 4.0
 
     even_gate: str = "raw_swish"
     even_act: str = "raw_swish"
@@ -87,8 +86,6 @@ class Leopold(nn.Module):
 
     @nn.compact
     def __call__(self, graph):
-        r_cutoff = jnp.float32(self.r_cutoff)
-
         # Set non linearities
         non_lin = {"e": self.even_act, "o": self.odd_act}
 
@@ -96,12 +93,12 @@ class Leopold(nn.Module):
         hidden_irr = Irreps(self.hidden_irr)
 
         # Get edges
-        dR = jnp.asarray(graph.edges)
-        R = jnp.linalg.norm(dR, axis=-1)
+        dR = IrrepsArray(Irreps("1e"), jnp.asarray(graph.edges))
+        R = jnp.linalg.norm(graph.edges, axis=-1)
 
         # Embed edges
-        dR_sh = spherical_harmonics(Irreps("1x0e + 1x1e"), dR, True)
-        R = BesselEmbedding(self.n_basis, r_cutoff - 0.5, r_cutoff)(R)
+        dR_sh = spherical_harmonics([i for i in range(self.n_harmo + 1)], dR, True)
+        R = BesselEmbedding(self.n_basis, self.r_cutoff - 0.5, self.r_cutoff)(R)
 
         # Take senders and recievers
         sender = jnp.asarray(graph.senders)
@@ -122,7 +119,7 @@ class Leopold(nn.Module):
                 radial_net_n_layers=self.radial_mlp_layers,
                 num_basis=self.n_basis,
                 n_neighbors=self.n_neighbour,
-                scalar_mlp_std=self.scalar_mlp_std,
+                scalar_mlp_std=4.0,
             )(conv, nodes, dR_sh, sender, reciev, R)
 
         # Get final layers
