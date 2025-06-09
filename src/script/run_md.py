@@ -29,7 +29,7 @@ import sys
 import os
 
 # Leopold
-from leopold.hdf5 import LeopoldCheckpointFile
+from leopold.hdf5 import LeopoldCheckpointFile, LeopoldH5MDState, LeopoldH5MDWriter
 from leopold.observables import leopold_model
 from leopold.dataset import leopold_data_constructor, read, Configuration
 from leopold import __version__
@@ -46,6 +46,10 @@ from ase.units import kB, fs
 
 # Typing
 from typing import Union, Optional, Callable
+
+# DATACLASS
+from dataclasses import asdict
+from jax_md import dataclasses
 
 # TESTING
 from tqdm import tqdm
@@ -73,6 +77,36 @@ GREETING = f"""
         ░░░░  ░░░░░░                  ░░░░        
         ░░░░  ░░░░                                
 """
+
+# ==== CLASSES ==== #
+
+
+@dataclasses.dataclass
+class NVTNoseHooverState:
+    """State information for an NVT system with a Nose-Hoover chain thermostat.
+
+    Attributes:
+      position: The current position of particles. An ndarray of floats
+        with shape `[n, spatial_dimension]`.
+      momentum: The momentum of particles. An ndarray of floats
+        with shape `[n, spatial_dimension]`.
+      force: The current force on the particles. An ndarray of floats with shape
+        `[n, spatial_dimension]`.
+      mass: The mass of the particles. Can either be a float or an ndarray
+        of floats with shape `[n]`.
+      chain: The variables describing the Nose-Hoover chain.
+    """
+
+    position: Array
+    momentum: Array
+    force: Array
+    mass: Array
+    ones_hot: Array
+    chain: simulate.NoseHooverChain
+
+    @property
+    def velocity(self):
+        return self.momentum / self.mass
 
 
 # ==== FUNCTIONS ==== #
@@ -102,7 +136,7 @@ def setup_logger(
     if (directory is not None) and (tag is not None):
         os.makedirs(directory, exist_ok=True)
 
-        fh = logging.FileHandler(os.path.join(directory, tag + ".log"))
+        fh = logging.FileHandler(os.path.join(directory, tag + ".log"), "w")
         fh.setFormatter(formatter)
 
         logger.addHandler(fh)
@@ -115,6 +149,7 @@ def nvt_nose_hoover(
     shift_fn: Callable,
     dt: float,
     kT: float,
+    npol: int,
     chain_length: int = 5,
     chain_steps: int = 2,
     sy_steps: int = 3,
@@ -143,14 +178,14 @@ def nvt_nose_hoover(
         dof = quantity.count_dof(R)
 
         (_, _), forces = model(R, ones_hot, box)
-        state = simulate.NVTNoseHooverState(R, None, -forces, mass, None)
+        state = NVTNoseHooverState(R, None, -forces, mass, ones_hot, None)
         state = simulate.canonicalize_mass(state)
         state = simulate.initialize_momenta(state, key, _kT)
         KE = quantity.kinetic_energy(momentum=state.momentum, mass=state.mass)
         return state.set(chain=thermostat.initialize(dof, KE, _kT))
 
     @jit
-    def apply_fn(state, ones_hot: Array, box: Array, **kwargs):
+    def apply_fn(state, box: Array, **kwargs):
         _kT = kT if "kT" not in kwargs else kwargs["kT"]
 
         chain = state.chain
@@ -165,7 +200,7 @@ def nvt_nose_hoover(
         state = simulate.position_step(state, shift_fn, dt, **kwargs)
 
         # Compute forces
-        aux, forces = model(state.position, ones_hot, box)
+        (energy, magchg), forces = model(state.position, state.ones_hot, box)
         state = state.set(force=-forces)
 
         state = simulate.momentum_step(state, dt_2)
@@ -179,7 +214,18 @@ def nvt_nose_hoover(
         p, chain = thermostat.half_step(state.momentum, chain, _kT)
         state = state.set(momentum=p, chain=chain)
 
-        return state, aux
+        # Set new polaron position
+        magmoms, charges = jnp.split(magchg, 2, axis=-1)
+        magmoms = magmoms.flatten()
+        pol_state = jnp.argsort(jnp.abs(magmoms))
+
+        ones_hot = state.ones_hot.at[:, -1].set(0)
+        ones_hot = ones_hot.at[pol_state[-npol:], -1].set(1)
+
+        state = state.set(ones_hot=ones_hot)
+
+        # Return everithing
+        return state, (energy, magmoms, charges, ones_hot[:, -1])
 
     return init_fn, apply_fn
 
@@ -203,6 +249,10 @@ def parse_args() -> Namespace:
     parser.add_argument("--logs_int", type=int, default=5)
     parser.add_argument("--logs_lev", help="log level", type=str, default="INFO")
     parser.add_argument("--logs_dir", type=str, default="logs")
+
+    # Trajectory options
+    parser.add_argument("--traj_dir", type=str, default="traj")
+    parser.add_argument("--traj_int", type=int, default=5)
 
     # General options
     parser.add_argument("--name", type=str, default=None)
@@ -287,38 +337,63 @@ def main():
     model = jax.jit(partial(apply_fn, params))
 
     # Create metric
-    _, shift = space.periodic_general(box)
+    _, shift = space.periodic_general(box, wrapped=False)
 
     # Create state
     dy_init_fn, step_fn = nvt_nose_hoover(
-        model, shift, args.time_step * fs, args.temperature * kB
+        model,
+        shift,
+        args.time_step * fs,
+        args.temperature * kB,
+        int(ones_hot[:, -1].sum()),
     )
     state = dy_init_fn(key, positions, ones_hot, box, mass=mass)
 
+    # Setup HDF5
+    writer = LeopoldH5MDWriter(tag + "-traj.h5", positions.shape[0])
+
     # Test steps
     for i in range(args.num_steps):
-        state, (energy, magchg) = step_fn(state, ones_hot, box)
-
-        magmoms, _ = jnp.split(magchg, 2, axis=-1)
-        magmoms = magmoms.flatten()
-        pol_state = jnp.argsort(jnp.abs(magmoms))
-
-        ones_hot = ones_hot.at[:, -1].set(0)
-        ones_hot = ones_hot.at[pol_state[-1], -1].set(1)
+        state, (energy, magmoms, charges, pol_state) = step_fn(state, box)
 
         temp = quantity.temperature(momentum=state.momentum, mass=state.mass) / kB
 
+        # Just checking for divergences
+        if jnp.isnan(energy) or jnp.isnan(temp):
+            break
+
         # Log results
         if i % args.logs_int == 0:
+            pol = jnp.argsort(jnp.abs(magmoms))
+
             logger.info(
                 f"{i * args.time_step * 1e-3:13.3f} "
                 f"{quantity.kinetic_energy(momentum=state.momentum, mass=state.mass) + energy:12.3f} "
                 f"{energy:12.3f} "
                 f"{temp:12.3f} "
-                f"{int(pol_state[-1]):14d} {magmoms[pol_state[-1]]:17.3f}"
-                f"{int(pol_state[-2]):15d} {magmoms[pol_state[-2]]:17.3f}"
+                f"{int(pol[-1]):14d} {magmoms[pol[-1]]:17.3f}"
+                f"{int(pol[-2]):15d} {magmoms[pol[-2]]:17.3f}"
                 f"{magmoms.sum():17.3f}"
             )
+
+        # Write frame to trajectory
+        if i % args.traj_int == 0:
+            # Save positions in Angstrom
+            position = jnp.matmul(state.position, box.T)
+
+            h5state = LeopoldH5MDState(
+                i, args.time_step, np.asarray(position), np.asarray(box)
+            )
+
+            observables = {
+                "energy": float(energy),
+                "temperature": float(temp),
+                "magmoms": np.asarray(magmoms),
+                "charges": np.asarray(charges),
+                "polarons": np.asarray(pol_state),
+            }
+
+            writer(h5state, observables)
 
 
 if __name__ == "__main__":

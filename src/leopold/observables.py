@@ -138,7 +138,10 @@ def leopold_graph_constructor(
 
 
 def leopold_model(
-    conf: dict, example_pos: Array, example_elem: Array, example_box: Array
+    conf: dict,
+    example_pos: Array,
+    example_elem: Array,
+    example_box: Array,
 ):
     # Get the model type
     impl = conf.pop("implementation", "e3nn")
