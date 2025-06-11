@@ -8,8 +8,6 @@ contact:  luca.leoni12@unibo.it
 
 # ==== IMPORTS ==== #
 
-from tqdm import tqdm
-
 # MATH
 import numpy as np
 
@@ -49,6 +47,9 @@ from dataclasses import asdict
 
 # PreattyTables
 from prettytable import PrettyTable
+
+# ASE
+from ase.symbols import Symbols
 
 # Typing
 from typing import Union, Optional
@@ -241,7 +242,7 @@ def main():
             f"Using following species dependent values for {key} scale and shift:"
         )
         for s, m, d in zip(info.species, info.averages[key], info.deviations[key]):
-            logger.info(f"\t*{s:<2d} -> {d} {m}")
+            logger.info(f"\t*{Symbols([s]):<2s} -> {d} {m}")
     logger.info(
         f"Average number of neighbours in dataset: {data['train'].info.average_neigh:.2f}"
     )

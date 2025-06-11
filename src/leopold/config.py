@@ -22,17 +22,42 @@ from leopold.nn.e3nn_imp import Leopold
 from leopold.dataset import DEFAULT_SCALAR_LABELS, DEFAULT_VECTOR_LABELS
 
 # Typing
-from typing import Union
+from typing import Union, Optional
 
 # ==== OBJECTS ==== #
 
 
 @dataclass
 class LeopoldMDOptions:
-    checkpoint_file: str
-    temperature: int = 0
+    # Mandatory
+    start_path: str
+    model_path: str
+
+    # Simulation options
+    temperature: int = 300  # K
+    time_step: float = 1.0  # fs
+    max_steps: int = 1_000_000
+
+    # Logging options
+    logs_int: int = 5
+    logs_dir: str = "logs"
+    logs_level: int = INFO
+
+    # Trajectory options
+    traj_dir: str = "traj"
+    traj_int: int = 10
+    traj_write_forces: bool = False
+    traj_write_velocity: bool = False
+    traj_compr_backend: str = "gzip"
+    traj_compr_level: int = 5
+    traj_author_name: str = "N/A"
+    traj_author_mail: Optional[str] = None
+
+    # General options
     use_float64: bool = True
-    seed: int = 42
+    rng_seed: int = 42
+    device: str = "gpu"
+    name: Optional[str] = None
 
 
 @dataclass
@@ -159,6 +184,32 @@ def read_leopold_configuration(path: str) -> LeopoldConfiguration:
             default[key].update(conf[key])
 
     return LeopoldConfiguration(**default)
+
+
+def read_leopold_md_options(path: str) -> LeopoldMDOptions:
+    with open(path, "r") as f:
+        conf = yaml.safe_load(f)
+
+    # Check the configuration
+    model_path = conf.pop("model_path", None)
+    if model_path is None:
+        raise KeyError(
+            f"No model path was specified inside MD configuration file: {path}"
+        )
+    start_path = conf.pop("start_path", None)
+    if start_path is None:
+        raise KeyError(
+            f"No starting configuration path was specified inside MD configuration file: {path}"
+        )
+
+    # Create object
+    default = LeopoldMDOptions(start_path, model_path)
+    default = asdict(default)
+
+    # update
+    default.update(conf)
+
+    return LeopoldMDOptions(**default)
 
 
 if __name__ == "__main__":

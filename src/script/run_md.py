@@ -32,6 +32,7 @@ import os
 from leopold.hdf5 import LeopoldCheckpointFile, LeopoldH5MDState, LeopoldH5MDWriter
 from leopold.observables import leopold_model
 from leopold.dataset import leopold_data_constructor, read, Configuration
+from leopold.config import read_leopold_md_options
 from leopold import __version__
 
 # Argument Parser
@@ -43,16 +44,13 @@ from functools import partial
 # ASE
 from ase.io import read as ase_read
 from ase.units import kB, fs
+from ase.symbols import Symbols
 
 # Typing
 from typing import Union, Optional, Callable
 
 # DATACLASS
-from dataclasses import asdict
 from jax_md import dataclasses
-
-# TESTING
-from tqdm import tqdm
 
 # ==== CONSTANTS ==== #
 
@@ -236,31 +234,7 @@ def nvt_nose_hoover(
 def parse_args() -> Namespace:
     parser = ArgumentParser("run_md")
 
-    # Main argument
-    parser.add_argument("conf_path", type=str)
-    parser.add_argument("model_path", type=str)
-
-    # Simulation options
-    parser.add_argument("--time_step", type=float, default=1)
-    parser.add_argument("--temperature", type=float, default=300)
-    parser.add_argument("--num_steps", type=int, default=10_000_000)
-
-    # Logging options
-    parser.add_argument("--logs_int", type=int, default=5)
-    parser.add_argument("--logs_lev", help="log level", type=str, default="INFO")
-    parser.add_argument("--logs_dir", type=str, default="logs")
-
-    # Trajectory options
-    parser.add_argument("--traj_dir", type=str, default="traj")
-    parser.add_argument("--traj_int", type=int, default=5)
-
-    # General options
-    parser.add_argument("--name", type=str, default=None)
-    parser.add_argument("--seed", type=int, default=123)
-    parser.add_argument(
-        "--device", type=str, choices=["cpu", "gpu", "tpu"], default="gpu"
-    )
-    parser.add_argument("--use_float64", action="store_true")
+    parser.add_argument("input")
 
     return parser.parse_args()
 
@@ -274,29 +248,32 @@ def main():
     # Argument parsing
     args = parse_args()
 
+    # read options
+    opts = read_leopold_md_options(args.input)
+
     # ---- SETUP
 
     # Retrieve training group
-    gtrain = LeopoldCheckpointFile(args.model_path, "r").get_training()
+    gtrain = LeopoldCheckpointFile(opts.model_path, "r").get_training()
 
     # Select tag
     tag = gtrain.conf.general.tag
-    if args.name is not None:
-        tag = args.name
+    if opts.name is not None:
+        tag = opts.name
 
     # Set the logger
-    logger = setup_logger(args.logs_lev, tag, args.logs_dir)
+    logger = setup_logger(opts.logs_level, tag, opts.logs_dir)
 
     # Set the default precision
-    if args.use_float64:
+    if opts.use_float64:
         jax.config.update("jax_enable_x64", True)
 
-    # Select the device
-    device = jax.devices()[0]
+    # Select the devices
+    device = jax.devices(opts.device)[0]
 
     # Get data constructor
     info = gtrain.get_dataset("train").info
-    info.max_num_atoms = len(ase_read(args.conf_path))
+    info.max_num_atoms = len(ase_read(opts.start_path))
 
     f = leopold_data_constructor(
         info,
@@ -305,28 +282,39 @@ def main():
         device,
     )
 
+    logger.info("LEOPOLD molecular dynamic script")
+
     # ---- READ ATOMS ---- #
+    logger.info(f"Reading starting configuration from {opts.start_path}")
+
     atoms = read(
-        args.conf_path,
+        opts.start_path,
         {},
         {"magmoms": gtrain.conf.datasets.labels["vector"]["magmoms"]},
         "0",
     )
 
-    # Save masses
+    # Save info
     mass = atoms[0].get_masses()
+    elem, nele = np.unique(atoms[0].get_atomic_numbers(), return_counts=True)
 
     # Get information on the configuration
     positions, ones_hot, box = Configuration(
         *jax.tree_util.tree_map(lambda x: x[0], f(atoms).config)
     )
 
+    logger.info(f"Read configuration with {len(atoms[0])} ions of types:")
+    for e, n in zip(elem, nele):
+        logger.info(f"\t*{Symbols([e]):<2s} -> {n}")
+    logger.info(f"Configuration contains {int(ones_hot[:, -1].sum())} polarons")
+
     # ---- INITIALIZE MODEL ---- #
+    logger.info("Initializing model")
     mconf = gtrain.model_conf
     apply_fn, init_fn = leopold_model(mconf, positions, ones_hot, box)
 
     # initialize
-    key, rng = jrn.split(jrn.PRNGKey(args.seed))
+    key, rng = jrn.split(jrn.PRNGKey(opts.rng_seed))
     params = init_fn(rng)
 
     # Load from checkpoint
@@ -343,17 +331,29 @@ def main():
     dy_init_fn, step_fn = nvt_nose_hoover(
         model,
         shift,
-        args.time_step * fs,
-        args.temperature * kB,
+        opts.time_step * fs,
+        opts.temperature * kB,
         int(ones_hot[:, -1].sum()),
     )
     state = dy_init_fn(key, positions, ones_hot, box, mass=mass)
 
     # Setup HDF5
-    writer = LeopoldH5MDWriter(tag + "-traj.h5", positions.shape[0])
+    os.makedirs(opts.traj_dir, exist_ok=True)
 
-    # Test steps
-    for i in range(args.num_steps):
+    writer = LeopoldH5MDWriter(
+        os.path.join(opts.traj_dir, tag + "-traj.h5"),
+        info.max_num_atoms,
+        compression=opts.traj_compr_backend,
+        compression_opts=opts.traj_compr_level,
+        forces=opts.traj_write_forces,
+        velocities=opts.traj_write_velocity,
+        author=opts.traj_author_name,
+        author_email=opts.traj_author_mail,
+    )
+
+    # ---- RUN
+    logger.info("Run MD")
+    for i in range(opts.max_steps):
         state, (energy, magmoms, charges, pol_state) = step_fn(state, box)
 
         temp = quantity.temperature(momentum=state.momentum, mass=state.mass) / kB
@@ -363,11 +363,11 @@ def main():
             break
 
         # Log results
-        if i % args.logs_int == 0:
+        if i % opts.logs_int == 0:
             pol = jnp.argsort(jnp.abs(magmoms))
 
             logger.info(
-                f"{i * args.time_step * 1e-3:13.3f} "
+                f"{i * opts.time_step * 1e-3:13.3f} "
                 f"{quantity.kinetic_energy(momentum=state.momentum, mass=state.mass) + energy:12.3f} "
                 f"{energy:12.3f} "
                 f"{temp:12.3f} "
@@ -377,14 +377,23 @@ def main():
             )
 
         # Write frame to trajectory
-        if i % args.traj_int == 0:
+        if i % opts.traj_int == 0:
             # Save positions in Angstrom
             position = jnp.matmul(state.position, box.T)
 
+            # Create the state
             h5state = LeopoldH5MDState(
-                i, args.time_step, np.asarray(position), np.asarray(box)
+                i, opts.time_step, np.asarray(position), np.asarray(box)
             )
 
+            # Update with requested info
+            if opts.traj_write_forces:
+                h5state.__setattr__("forces", np.asarray(state.force))
+
+            if opts.traj_write_velocity:
+                h5state.__setattr__("velocities", np.asarray(state.velocity))
+
+            # Create observables
             observables = {
                 "energy": float(energy),
                 "temperature": float(temp),
@@ -393,7 +402,9 @@ def main():
                 "polarons": np.asarray(pol_state),
             }
 
+            # Write stuff
             writer(h5state, observables)
+    logger.info("DONE")
 
 
 if __name__ == "__main__":
