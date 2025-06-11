@@ -105,7 +105,7 @@ def setup_logger(
     if (directory is not None) and (tag is not None):
         os.makedirs(directory, exist_ok=True)
 
-        fh = logging.FileHandler(os.path.join(directory, tag + ".log"))
+        fh = logging.FileHandler(os.path.join(directory, tag + ".log"), "w")
         fh.setFormatter(formatter)
 
         logger.addHandler(fh)
@@ -242,7 +242,7 @@ def main():
             f"Using following species dependent values for {key} scale and shift:"
         )
         for s, m, d in zip(info.species, info.averages[key], info.deviations[key]):
-            logger.info(f"\t*{Symbols([s]):<2s} -> {d} {m}")
+            logger.info(f"\t*{Symbols([s]).get_chemical_formula():<2s} -> {d} {m}")
     logger.info(
         f"Average number of neighbours in dataset: {data['train'].info.average_neigh:.2f}"
     )
@@ -365,7 +365,7 @@ def main():
             "magsum": 0.0,
         }
 
-        for batch in tqdm(data["train"]):
+        for batch in data["train"]:
             params, opt_state, losses = update_fn(params, opt_state, batch)
 
             for key, loss in zip(train_loss.keys(), losses):
@@ -383,7 +383,7 @@ def main():
             "charge": 0.0,
             "magsum": 0.0,
         }
-        for batch in tqdm(data["validation"]):
+        for batch in data["validation"]:
             losses = loss_fn(params, *batch)
 
             # Flatten the tuple
