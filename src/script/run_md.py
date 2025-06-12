@@ -364,6 +364,14 @@ def main():
 
         # Log results
         if i % opts.logs_int == 0:
+            if i == opts.logs_int:
+                logger.info(
+                    f"{'Date':<10s} {'Real Time':<10s} {'MD Time[ps]':>12s} "
+                    f"{'Etot[eV]':>12s} {'Epot[eV]':>12s} {'Temp[K]':>12s} "
+                    f"{'Polaron[idx]':>14s} {'Pol. Mag.[μ]':>17s} "
+                    f"{'2˚ Pol.[idx]':>14s} {'2˚ Mag.[μ]':>17s}\n"
+                )
+
             pol = jnp.argsort(jnp.abs(magmoms))
 
             logger.info(
@@ -378,14 +386,6 @@ def main():
 
         # Write frame to trajectory
         if i % opts.traj_int == 0:
-            if i == opts.traj_int:
-                logger.info(
-                    f"{'Date':<10s} {'Real Time':<10s} {'MD Time[ps]':>12s} "
-                    f"{'Etot[eV]':>12s} {'Epot[eV]':>12s} {'Temp[K]':>12s} "
-                    f"{'Polaron[idx]':>14s} {'Pol. Mag.[μ]':>17s} "
-                    f"{'2˚ Pol.[idx]':>14s} {'2˚ Mag.[μ]':>17s}\n"
-                )
-
             # Save positions in Angstrom
             position = jnp.matmul(state.position, box.T)
 
