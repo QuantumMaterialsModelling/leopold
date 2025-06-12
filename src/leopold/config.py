@@ -69,13 +69,15 @@ class LeopoldGeneralOptions:
     logs_dir: str = "logs"
     logs_lev: Union[int, str] = INFO
     use_float64: bool = True
-    checkpoint_file: str = ""
+    checkpoint_name: Optional[str] = None
     device: str = "gpu"
 
-    def __post_init__(self) -> None:
-        # If checkpoint file not given then set it to tag name
-        if self.checkpoint_file == "":
-            self.checkpoint_file = self.tag + ".h5"
+    @property
+    def checkpoint_file(self) -> str:
+        if self.checkpoint_name is None:
+            return self.tag + ".h5"
+        else:
+            return self.checkpoint_name
 
     @property
     def tag(self) -> str:
