@@ -305,7 +305,7 @@ def main():
 
     logger.info(f"Read configuration with {len(atoms[0])} ions of types:")
     for e, n in zip(elem, nele):
-        logger.info(f"\t*{Symbols([e]):<2s} -> {n}")
+        logger.info(f"\t*{Symbols([e]).get_chemical_formula():<2s} -> {n}")
     logger.info(f"Configuration contains {int(ones_hot[:, -1].sum())} polarons")
 
     # ---- INITIALIZE MODEL ---- #
@@ -378,6 +378,14 @@ def main():
 
         # Write frame to trajectory
         if i % opts.traj_int == 0:
+            if i == opts.traj_int:
+                logger.info(
+                    f"{'Date':<10s} {'Real Time':<10s} {'MD Time[ps]':>12s} "
+                    f"{'Etot[eV]':>12s} {'Epot[eV]':>12s} {'Temp[K]':>12s} "
+                    f"{'Polaron[idx]':>14s} {'Pol. Mag.[μ]':>17s} "
+                    f"{'2˚ Pol.[idx]':>14s} {'2˚ Mag.[μ]':>17s}\n"
+                )
+
             # Save positions in Angstrom
             position = jnp.matmul(state.position, box.T)
 
