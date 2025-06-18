@@ -51,7 +51,7 @@ class LeopoldMDOptions:
     traj_compr_backend: str = "gzip"
     traj_compr_level: int = 5
     traj_author_name: str = "N/A"
-    traj_author_mail: Optional[str] = None
+    traj_author_mail: str = "N/A"
 
     # General options
     use_float64: bool = True

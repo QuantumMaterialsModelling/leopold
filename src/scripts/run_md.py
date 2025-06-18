@@ -296,7 +296,8 @@ def main():
 
     # Save info
     mass = atoms[0].get_masses()
-    elem, nele = np.unique(atoms[0].get_atomic_numbers(), return_counts=True)
+    spec = atoms[0].get_atomic_numbers()
+    elem, nele = np.unique(spec, return_counts=True)
 
     # Get information on the configuration
     positions, ones_hot, box = Configuration(
@@ -342,11 +343,12 @@ def main():
 
     writer = LeopoldH5MDWriter(
         os.path.join(opts.traj_dir, tag + "-traj.h5"),
-        info.max_num_atoms,
+        spec,
+        n_frames=opts.max_steps // opts.traj_int,
         compression=opts.traj_compr_backend,
         compression_opts=opts.traj_compr_level,
-        forces=opts.traj_write_forces,
         velocities=opts.traj_write_velocity,
+        forces=opts.traj_write_forces,
         author=opts.traj_author_name,
         author_email=opts.traj_author_mail,
     )
@@ -354,8 +356,10 @@ def main():
     # ---- RUN
     logger.info("Run MD")
     for i in range(opts.max_steps):
+        # perform the step
         state, (energy, magmoms, charges, pol_state) = step_fn(state, box)
 
+        # Collect temperature
         temp = quantity.temperature(momentum=state.momentum, mass=state.mass) / kB
 
         # Just checking for divergences
@@ -364,12 +368,13 @@ def main():
 
         # Log results
         if i % opts.logs_int == 0:
-            if i == opts.logs_int:
+            if i == 0:
                 logger.info(
-                    f"{'Date':<10s} {'Real Time':<10s} {'MD Time[ps]':>12s} "
+                    f"{'MD Time[ps]':>13s} "
                     f"{'Etot[eV]':>12s} {'Epot[eV]':>12s} {'Temp[K]':>12s} "
                     f"{'Polaron[idx]':>14s} {'Pol. Mag.[μ]':>17s} "
-                    f"{'2˚ Pol.[idx]':>14s} {'2˚ Mag.[μ]':>17s}\n"
+                    f"{'2˚ Pol.[idx]':>14s} {'2˚ Mag.[μ]':>17s}"
+                    f"{'Tot. Mag.[μ]':>17s}"
                 )
 
             pol = jnp.argsort(jnp.abs(magmoms))
@@ -395,11 +400,11 @@ def main():
             )
 
             # Update with requested info
-            if opts.traj_write_forces:
-                h5state.__setattr__("forces", np.asarray(state.force))
-
             if opts.traj_write_velocity:
                 h5state.__setattr__("velocities", np.asarray(state.velocity))
+
+            if opts.traj_write_forces:
+                h5state.__setattr__("forces", np.asarray(state.force))
 
             # Create observables
             observables = {

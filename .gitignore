@@ -4,6 +4,7 @@
 src/__pycache__/*
 src/leopold/__pycache__/*
 src/old/__pycache__/*
+src/scripts/__pycache__/*
 
 train-mgo/*
 train-tio/*
