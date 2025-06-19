@@ -100,6 +100,7 @@ class NVTNoseHooverState:
     force: Array
     mass: Array
     ones_hot: Array
+    dof_mask: Array
     chain: simulate.NoseHooverChain
 
     @property
@@ -142,6 +143,26 @@ def setup_logger(
     return logger
 
 
+def count_dof(R: Array, dof_mask: Array) -> int:
+    return jax.tree_util.tree_reduce(lambda accum, x: accum + x.size, R[dof_mask], 0)
+
+
+def temperature(
+    momentum: Array,
+    dof_mask: Array,
+    mass: Array = jnp.float32(1.0),
+) -> float:
+    dof = count_dof(momentum, dof_mask)
+
+    kT = jax.tree_util.tree_map(lambda m, q: jnp.sum(q**2 / m) / dof, mass, momentum)
+    return jax.tree_util.tree_reduce(lambda a, b: a + b, kT, 0.0)
+
+
+def apply_dof_mask(state: NVTNoseHooverState) -> NVTNoseHooverState:
+    momentum = jnp.where(state.dof_mask, state.momentum, 0)
+    return state.set(momentum=momentum)
+
+
 def nvt_nose_hoover(
     model: Callable,
     shift_fn: Callable,
@@ -169,16 +190,21 @@ def nvt_nose_hoover(
         ones_hot: Array,
         box: Array,
         mass=jnp.float32(1.0),
+        dof_mask: Optional[Array] = None,
         **kwargs,
     ):
         _kT = kT if "kT" not in kwargs else kwargs["kT"]
 
-        dof = quantity.count_dof(R)
+        if dof_mask is None:
+            dof_mask = jnp.ones_like(R) == 1
+
+        dof = count_dof(R, dof_mask)
 
         (_, _), forces = model(R, ones_hot, box)
-        state = NVTNoseHooverState(R, None, -forces, mass, ones_hot, None)
+        state = NVTNoseHooverState(R, None, -forces, mass, ones_hot, dof_mask, None)
         state = simulate.canonicalize_mass(state)
         state = simulate.initialize_momenta(state, key, _kT)
+        state = apply_dof_mask(state)
         KE = quantity.kinetic_energy(momentum=state.momentum, mass=state.mass)
         return state.set(chain=thermostat.initialize(dof, KE, _kT))
 
@@ -202,6 +228,7 @@ def nvt_nose_hoover(
         state = state.set(force=-forces)
 
         state = simulate.momentum_step(state, dt_2)
+        state = apply_dof_mask(state)
 
         chain = chain.set(
             kinetic_energy=quantity.kinetic_energy(
@@ -210,6 +237,7 @@ def nvt_nose_hoover(
         )
 
         p, chain = thermostat.half_step(state.momentum, chain, _kT)
+        p = jnp.where(state.dof_mask, p, 0)
         state = state.set(momentum=p, chain=chain)
 
         # Set new polaron position
@@ -299,6 +327,12 @@ def main():
     spec = atoms[0].get_atomic_numbers()
     elem, nele = np.unique(spec, return_counts=True)
 
+    # Search for dof
+    dof_mask = atoms[0].arrays.get("selective_dynamic", None)
+    if dof_mask is None:
+        dof_mask = np.ones_like(atoms[0].get_positions())
+    dof_mask = jnp.array(dof_mask) == 1
+
     # Get information on the configuration
     positions, ones_hot, box = Configuration(
         *jax.tree_util.tree_map(lambda x: x[0], f(atoms).config)
@@ -336,7 +370,7 @@ def main():
         opts.temperature * kB,
         int(ones_hot[:, -1].sum()),
     )
-    state = dy_init_fn(key, positions, ones_hot, box, mass=mass)
+    state = dy_init_fn(key, positions, ones_hot, box, mass=mass, dof_mask=dof_mask)
 
     # Setup HDF5
     os.makedirs(opts.traj_dir, exist_ok=True)
@@ -360,7 +394,7 @@ def main():
         state, (energy, magmoms, charges, pol_state) = step_fn(state, box)
 
         # Collect temperature
-        temp = quantity.temperature(momentum=state.momentum, mass=state.mass) / kB
+        temp = temperature(state.momentum, state.dof_mask, state.mass) / kB
 
         # Just checking for divergences
         if jnp.isnan(energy) or jnp.isnan(temp):
