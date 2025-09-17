@@ -64,7 +64,9 @@ class FullyConnectedTensorProduct(nn.Module):
         e = cue.descriptors.fully_connected_tensor_product(
             x1.irreps, x2.irreps, self.irr_out
         )
-        w = self.param("weights", lambda x: cuex.randn(x, e.operands[0]))
+        w = self.param(
+            "weights", lambda x: cuex.randn(x, e.operands[0], dtype=x1.dtype)
+        )
 
         return cuex.equivariant_polynomial(e, [w, x1, x2])  # pyright: ignore
 
@@ -87,7 +89,9 @@ class Linear(nn.Module):
         #       for weights acting on scalars and the one acting on other parts.
         #       Thus, the implementation would need to do something like what is done
         #       inside line 72 of linear.py in e3nn
-        w = self.param("weights", lambda key: cuex.randn(key, e.operands[0]))
+        w = self.param(
+            "weights", lambda key: cuex.randn(key, e.operands[0], dtype=x.dtype)
+        )
 
         return cuex.equivariant_polynomial(e, [w, x])  # pyright: ignore
 

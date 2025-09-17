@@ -821,7 +821,7 @@ class LeopoldH5MDWriter:
 
 
 class LeopoldH5MDReader:
-    def __init__(self, filename) -> None:
+    def __init__(self, filename, beg: int = 0, end: int = -1, step: int = 1) -> None:
         # Open the file
         self.h5md_file = LeopoldH5MD(filename, "r")
 
@@ -850,24 +850,53 @@ class LeopoldH5MDReader:
         # Read species
         self.species = Dataset(self._traj["species"].id)[()]
 
-    def __getitem__(self, idx):
-        return self._read_frame(idx)
+        # Save slice
+        n_frames = Dataset(self._traj["box/edges/step"].id).shape[0]
+        if end == -1 or end > n_frames:
+            self._idxs = slice(beg, n_frames, step)
+        elif end < -1:
+            self._idxs = slice(beg, n_frames + end, step)
+        else:
+            self._idxs = slice(beg, end, step)
+
+    def __getitem__(self, idx: Union[int, slice]):
+        if isinstance(idx, slice):
+            # Make the given slice better
+            start = 0 if idx.start is None else idx.start
+            stop = self._idxs.stop if idx.stop is None else idx.stop
+            step = 1 if idx.step is None else idx.step
+
+            # Compute wanted new indicies
+            lenght = stop - start
+            beg, end, s = self._idxs.indices(lenght)
+
+            # Perform a shift
+            beg += start
+            end += start
+
+            return LeopoldH5MDReader(self.h5md_file.filename, beg, end, step * s)
+
+        # Check if is in range
+        if idx > self._idxs.stop:
+            raise KeyError("Index out of range!")
+
+        return self._read_frame(self._idxs.start + idx * self._idxs.step)
 
     def __iter__(self):
-        self.idx = 0
+        self.idx = self._idxs.start
 
         return self
 
     def __next__(self) -> Atoms:
-        if self.idx >= self.n_frames:
+        if self.idx >= self._idxs.stop:
             raise StopIteration()
 
         atoms = self._read_frame(self.idx)
-        self.idx += 1
+        self.idx += self._idxs.step
 
         return atoms
 
-    def _read_frame(self, frame: int):
+    def _read_frame(self, frame: int) -> Atoms:
         """reads data from h5md file and copies to current timestep"""
         atoms = Atoms(self.species, pbc=True)
 
@@ -897,4 +926,4 @@ class LeopoldH5MDReader:
 
     @property
     def n_frames(self) -> int:
-        return Dataset(self._traj["box/edges/step"].id).shape[0]
+        return (self._idxs.stop - self._idxs.start) // self._idxs.step

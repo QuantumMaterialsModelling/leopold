@@ -9,7 +9,6 @@ contact:  luca.leoni12@unibo.it
 # ==== DEPENDENCIES ==== #
 
 # Math
-from jax import tree_util
 import jax.numpy as jnp
 
 # Flax
@@ -18,18 +17,53 @@ import flax.linen as nn
 # NN generals
 from leopold.nn.generals import BesselEmbedding
 from jax_md.nn import nequip
-# from jax_md._nn.util import BesselEmbedding
 
 # e3nn
 from e3nn_jax import Irreps, IrrepsArray
-from e3nn_jax import spherical_harmonics
+from e3nn_jax import spherical_harmonics, FunctionalLinear
+from e3nn_jax.utils import vmap
+
+# Functools
+from functools import partial
 
 # Typing
 from jax.typing import ArrayLike
-from jraph import segment_sum
 
 
 # ==== OBJECTS ==== #
+
+
+class Linear(nn.Module):
+    irreps_out: Irreps
+
+    @nn.compact
+    def __call__(self, x: IrrepsArray) -> IrrepsArray:
+        irreps_out = Irreps(self.irreps_out)
+
+        x = x.remove_nones().simplify()
+
+        lin = FunctionalLinear(x.irreps, irreps_out, instructions=None, biases=None)
+
+        w = [
+            self.param(
+                f"b[{ins.i_out}] {lin.irreps_out[ins.i_out]}",
+                nn.initializers.normal(stddev=ins.weight_std, dtype=x.dtype),
+                ins.path_shape,
+            )
+            if ins.i_in == -1
+            else self.param(
+                f"w[{ins.i_in},{ins.i_out}] {lin.irreps_in[ins.i_in]},"
+                f"{lin.irreps_out[ins.i_out]}",
+                nn.initializers.normal(stddev=ins.weight_std, dtype=x.dtype),
+                ins.path_shape,
+            )
+            for ins in lin.instructions
+        ]
+
+        f = partial(lin, w)
+        for _ in range(x.ndim - 1):
+            f = vmap(f)
+        return f(x)
 
 
 class Leopold(nn.Module):
@@ -108,7 +142,7 @@ class Leopold(nn.Module):
         nodes = IrrepsArray(Irreps(f"{self.n_elems}x0e"), graph.nodes)
 
         # Perform convolution
-        conv = nequip.Linear(hidden_irr)(nodes)
+        conv = Linear(hidden_irr)(nodes)
         for _ in range(self.n_convo):
             conv = nequip.NequIPConvolution(
                 hidden_irreps=hidden_irr,
@@ -127,12 +161,12 @@ class Leopold(nn.Module):
         second_irreps = Irreps(f"{second_irreps}x0e")
 
         # Energy calculation
-        energy = nequip.Linear(second_irreps)(conv)
-        energy = nequip.Linear(Irreps("1x0e"))(energy).array
+        energy = Linear(second_irreps)(conv)
+        energy = Linear(Irreps("1x0e"))(energy).array
 
         # Magnetization and Charge calculation
-        magchg = nequip.Linear(second_irreps)(conv)
-        magchg = nequip.Linear(Irreps("2x0e"))(magchg).array
+        magchg = Linear(second_irreps)(conv)
+        magchg = Linear(Irreps("2x0e"))(magchg).array
 
         # Scale and Shift energy
         scale = self.energy_scale
