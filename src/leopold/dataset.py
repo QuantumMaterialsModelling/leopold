@@ -312,6 +312,13 @@ def read(
         magmom_label = vector_labels.get("magmoms", None)
         charge_label = vector_labels.get("charges", None)
 
+        # Using the basic labels needs special treatment
+        if magmom_label == "magmoms":
+            atoms.arrays[magmom_label] = atoms.get_magnetic_moments()[:, np.newaxis]
+        if charge_label == "charge":
+            atoms.arrays[charge_label] = atoms.get_charges()[:, np.newaxis]
+
+        # Other labels needs better looks
         if magmom_label is not None and atoms.arrays[magmom_label].ndim == 1:
             atoms.arrays[magmom_label] = atoms.arrays[magmom_label][:, np.newaxis]
         if charge_label is not None and atoms.arrays[charge_label].ndim == 1:
