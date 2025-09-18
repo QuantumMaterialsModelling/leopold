@@ -328,7 +328,7 @@ def main():
     elem, nele = np.unique(spec, return_counts=True)
 
     # Search for dof
-    dof_mask = atoms[0].arrays.get("selective_dynamic", None)
+    dof_mask = atoms[0].arrays.get("selective_dynamics", None)
     if dof_mask is None:
         dof_mask = np.ones_like(atoms[0].get_positions())
     dof_mask = jnp.array(dof_mask) == 1
