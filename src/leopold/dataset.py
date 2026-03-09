@@ -141,7 +141,7 @@ class LeopoldDataLoader:
         self,
         raw_data: list[Atoms] | LeopoldData,
         batch_size: int = 1,
-        device: Device = jax.devices("cuda")[0],
+        device: Device = jax.default_device,
         shuffle: bool = True,
         **kwargs,
     ) -> None:

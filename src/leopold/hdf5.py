@@ -172,7 +172,7 @@ def save_tree_to_hdf5(group: Group, tree: Any, compression: int = 9) -> None:
     group.require_dataset("struct", (1,), f"S{len(struct)}")[()] = struct
 
 
-def save_hdf5_to_tree(group: Group, device=jax.devices("gpu")[0]) -> Any:
+def save_hdf5_to_tree(group: Group, device=jax.devices("cpu")[0]) -> Any:
     # Collect the struct of the tree
     struct = pickle.loads(Dataset(group["struct"].id)[()])
 
@@ -231,6 +231,20 @@ class LeopoldHDF5(File):
         # Add last modification attributes
         if "w" in mode or "a" in mode:
             self["creator"].attrs["modified"] = str(np.datetime64("now"))
+
+
+class DatasetView(Dataset):
+    def __init__(
+        self, bind, *, readonly=False, beg: int = 0, end: int = -1, step: int = 1
+    ):
+        super().__init__(bind, readonly=readonly)
+
+        self.__beg = beg
+        self.__end = end
+        self.__step = step
+
+    def __getitem__(self, args, new_dtype=None):
+        return super().__getitem__(args, new_dtype)
 
 
 # ==== General Group ==== #
@@ -859,6 +873,27 @@ class LeopoldH5MDReader:
         else:
             self._idxs = slice(beg, end, step)
 
+    def get_dataset(self, property: str) -> NDArray:
+        # Check if present
+        if property not in self._traj and property not in self._obs:
+            raise KeyError(
+                f"LeopoldH5MDReader: no {property} present in trajectory but requested!"
+            )
+
+        # Return wanted property
+        if property == "force":
+            return self._for[self._idxs]
+        elif property == "velocity":
+            return self._vel[self._idxs]
+        elif property == "position":
+            return self._pos[self._idxs]
+        elif property == "cell":
+            return Dataset(self._traj["box/edges/value"].id)[self._idxs]
+        elif property in self._scalar_data.keys():
+            return self._scalar_data[property][self._idxs]
+        elif property in self._vector_data.keys():
+            return self._vector_data[property][self._idxs]
+
     def __getitem__(self, idx: Union[int, slice]):
         if isinstance(idx, slice):
             # Make the given slice better
@@ -866,15 +901,17 @@ class LeopoldH5MDReader:
             stop = self._idxs.stop if idx.stop is None else idx.stop
             step = 1 if idx.step is None else idx.step
 
-            # Compute wanted new indicies
-            lenght = stop - start
-            beg, end, s = self._idxs.indices(lenght)
-
             # Perform a shift
-            beg += start
-            end += start
+            start += self._idxs.start if start > 0 else self._idxs.start
+            stop += self._idxs.start if stop > 0 else self._idxs.stop
 
-            return LeopoldH5MDReader(self.h5md_file.filename, beg, end, step * s)
+            # Set maximum possible value for stop and start
+            start = max(start, self._idxs.start)
+            stop = min(stop, self._idxs.stop)
+
+            return LeopoldH5MDReader(
+                self.h5md_file.filename, start, stop, step * self._idxs.step
+            )
 
         # Check if is in range
         if idx > self._idxs.stop:
