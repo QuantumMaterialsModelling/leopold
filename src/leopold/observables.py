@@ -174,10 +174,12 @@ def evaluate_model(
             -2, keepdims=True
         )
 
-        rmse["energy"] += np.square(energy - batch.labels.energy).sum()
-        rmse["forces"] += np.sum(jnp.square(forces + batch.labels.forces) / N)
-        rmse["charges"] += np.sum(jnp.square(charges - batch.labels.charges) / N)
-        rmse["magmoms"] += np.sum(jnp.square(magmoms - batch.labels.magmoms) / N)
+        # We want energy per atom
+        rmse["energy"] += np.square(energy - batch.labels.energy).sum() / N
+        # Forces are 3D vector so needs to divide by N and 3
+        rmse["forces"] += np.sum(jnp.square(forces + batch.labels.forces)) / N / 3
+        rmse["charges"] += np.sum(jnp.square(charges - batch.labels.charges)) / N
+        rmse["magmoms"] += np.sum(jnp.square(magmoms - batch.labels.magmoms)) / N
 
     # perform mean and root
     for key, val in rmse.items():

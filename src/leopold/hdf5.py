@@ -888,7 +888,7 @@ class LeopoldH5MDReader:
         elif property == "position":
             return self._pos[self._idxs]
         elif property == "cell":
-            return Dataset(self._traj["box/edges/value"].id)[self._idxs]
+            return self._edges[self._idxs]
         elif property in self._scalar_data.keys():
             return self._scalar_data[property][self._idxs]
         elif property in self._vector_data.keys():

@@ -417,7 +417,7 @@ def main():
 
     # Collect results
     table = PrettyTable(
-        ["", "energy (meV)", "forces (meV/A)", "charges (me)", "magmoms (mµ)"]
+        ["", "energy (meV / Atoms)", "forces (meV/A)", "charges (me)", "magmoms (mµ)"]
     )
 
     # Evaluate the model
@@ -428,7 +428,8 @@ def main():
         table.add_row(vals)
 
     # Print it
-    logger.info(table)
+    for tline in table.get_string().split("\n"):
+        logger.info(tline)
 
 
 if __name__ == "__main__":
