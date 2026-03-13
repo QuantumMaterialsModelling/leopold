@@ -284,7 +284,10 @@ def main():
 
         # Get params and optimizer state
         params, opt_state, _, _ = gtrain.load_state(LeopoldState(params, opt_state, 0))
+
+        # Put on device
         opt_state = tree.tree_map(lambda x: jax.device_put(x, device), opt_state)
+        params = tree.tree_map(lambda x: jax.device_put(x, device), params)
     # If restarted anew load only model
     elif tconf.restart and fcheck.n_train > 1:
         logger.info("Reading best model from previous existing checkpoint")
