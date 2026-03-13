@@ -184,7 +184,7 @@ def main():
     # ---- DATASET
 
     # if data_paths is empty read from HDF5
-    if len(dconf.data_paths) == 0:
+    if tconf.restart_data and tconf.restart:
         logger.info("Reading dataset from checkpoint")
         data = gtrain.get_datasets()
 
@@ -284,6 +284,7 @@ def main():
 
         # Get params and optimizer state
         params, opt_state, _, _ = gtrain.load_state(LeopoldState(params, opt_state, 0))
+        params = tree.tree_map(lambda x: jax.device_put(x, device), params)
     # If restarted anew load only model
     elif tconf.restart and fcheck.n_train > 1:
         logger.info("Reading best model from previous existing checkpoint")
@@ -398,8 +399,8 @@ def main():
         # Loss logger
         train_log, valid_log = "", ""
         for (key, tval), (_, vval) in zip(train_loss.items(), valid_loss.items()):
-            train_log += f"{tval:>12.8f} " if key != "total" else f"{tval:>13.8f}"
-            valid_log += f"{vval:>12.8f} " if key != "total" else f"{vval:>13.8f}"
+            train_log += f"{tval:>12.6f} " if key != "total" else f"{tval:>13.6f}"
+            valid_log += f"{vval:>12.6f} " if key != "total" else f"{vval:>13.6f}"
 
         logger.info(
             f"Epoch {i:4} ==> Train: {train_log}   Validation: {valid_log}| {tconf.learning_rate * optax.tree_utils.tree_get(opt_state, 'scale'):12.8f}"

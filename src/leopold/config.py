@@ -90,6 +90,7 @@ class LeopoldTrainingOptions:
     max_epoch: int = 1000
     patience: int = 200
     restart: bool = False
+    restart_data: bool = True
     batch_size: int = 2
 
     # Options for the loss function
