@@ -423,6 +423,9 @@ def main():
                 f"{magmoms.sum():17.3f}"
             )
 
+            # Use logger timing to flush the HDF5 file
+            writer.h5md_file.flush()
+
         # Write frame to trajectory
         if i % opts.traj_int == 0:
             # Save positions in Angstrom

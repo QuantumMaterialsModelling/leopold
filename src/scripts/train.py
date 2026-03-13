@@ -407,6 +407,7 @@ def main():
 
         # Saving State
         gtrain.update_state(LeopoldState(params, opt_state, float(valid_loss["total"])))
+        fcheck.flush()
 
     # ---- FINAL EVALUATION
     logger.info("Finished training, evaluating model...")
