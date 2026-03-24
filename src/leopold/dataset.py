@@ -643,6 +643,73 @@ def leopold_load_datasets(
     return datasets
 
 
+# ==== DATA DESTRUCTOR ==== #
+
+
+def leopold_data_desctructor(
+    info: LeopoldDataInfo,
+    scalar_labels: dict[str, str],
+    vector_labels: dict[str, str],
+    device: Device = jax.default_device,
+) -> Callable[[LeopoldData], list[Atoms]]:
+    """Construct the data destructor function
+
+    Defines the way in which the LeopoldData object can be converted back into
+    a list of ASE Atoms objects. Theway in which this works is completly equal
+    to the leopold_data_constructor function only that the final result is
+    a function that takes as input a LeopoldData and return a list of Atoms.
+
+    Args:
+        info: general info on the dataset
+        scalar_labels: labels related to the scalar observables
+        vector_labels: labels related to the vector observables
+
+    Returns:
+        function that takes as input a LopoldData and return a list of ASE Atoms
+    """
+
+    def data_desctructor(data: LeopoldData) -> list[Atoms]:
+        # Get the labels
+        labels = data.labels._asdict()
+
+        # Define the result list
+        raw_data: list[Atoms] = []
+
+        # Gather number of confs
+        nconfs = data.config.ones_hot.shape[0]
+
+        for i in range(nconfs):
+            # Get number of atoms
+            natoms = int(jnp.sum(data.config.ones_hot[i]))
+
+            # Get positions and cell
+            cell = np.asarray(data.config.box[i])
+            posi = np.asarray(data.config.positions[i, :natoms])
+
+            # Get species
+            spec = np.asarray(data.config.ones_hot[i, :natoms, :-1])
+            spec = spec @ info.species
+
+            # Define the atoms
+            atoms = Atoms(numbers=spec, scaled_positions=posi, cell=cell)
+
+            # Gather scalar labels
+            for key, val in scalar_labels.items():
+                if labels[key] is not None:
+                    atoms.info[val] = np.asarray(labels[key][i])
+
+            # Gather vector labels
+            for key, val in vector_labels.items():
+                if labels[key] is not None:
+                    atoms.arrays[val] = np.asarray(labels[key][i, :natoms])
+
+            raw_data.append(atoms)
+
+        return raw_data
+
+    return data_desctructor
+
+
 # ==== TEST ==== #
 if __name__ == "__main__":
     atoms = read("test.xyz", DEFAULT_SCALAR_LABELS, DEFAULT_VECTOR_LABELS)
