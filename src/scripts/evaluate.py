@@ -173,7 +173,6 @@ def main():
     # ---- EVALUATE MODEL ---- #
 
     # Prepare RMSE table
-    # Collect results
     table = PrettyTable(
         ["", "energy (meV / Atoms)", "forces (meV/A)", "charges (me)", "magmoms (mµ)"]
     )
@@ -219,7 +218,7 @@ def main():
             atoms = destr(batch)
             for i, atom in enumerate(atoms):
                 atom.info[args.label + "_" + scalar_labels["energy"]] = float(energy[i])
-                atom.arrays[args.label + "_" + vector_labels["forces"]] = forces[i]
+                atom.arrays[args.label + "_" + vector_labels["forces"]] = -forces[i]
                 atom.arrays[args.label + "_" + vector_labels["magmoms"]] = magmoms[i]
                 atom.arrays[args.label + "_" + vector_labels["charges"]] = charges[i]
 
@@ -228,7 +227,7 @@ def main():
 
         # perform mean and root
         for key, val in rmse.items():
-            rmse[key] = np.sqrt(val / len(data))
+            rmse[key] = np.sqrt(val / len(data[name]))
 
         # Add to RMSE table
         vals = [v * 1e3 for v in rmse.values()]
