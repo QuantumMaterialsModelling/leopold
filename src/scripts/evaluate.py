@@ -18,6 +18,7 @@ import jax.random as jrn
 from jax import jit, vmap
 
 # System
+from os import makedirs
 from os.path import basename, join, dirname
 
 # Leopold
@@ -88,6 +89,11 @@ def parse_args() -> Namespace:
         default=None,
         help="Name used for the output .xyz file",
     )
+    parser.add_argument(
+        "--directory",
+        default=None,
+        help="Output directory used for the output .xyz file",
+    )
 
     parser.add_argument(
         "--use_float32",
@@ -130,6 +136,10 @@ def main():
 
     # Select the devices
     device = jax.devices(args.device)[0]
+
+    # If folder is present make sure it exist
+    if args.folder is not None:
+        makedirs(args.folder, exist_ok=True)
 
     # ---- LOAD DATA
     data_path = {}
@@ -235,7 +245,8 @@ def main():
         table.add_row(vals)
 
         # Write traj to file
-        path = join(dirname(data_path[name]), tag + "_" + name + ".xyz")
+        path = dirname(data_path[name]) if args.directory is None else args.directory
+        path = join(path, tag + "_" + name + ".xyz")
         write(path, traj, format="extxyz")
 
     # Print it
