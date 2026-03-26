@@ -18,8 +18,13 @@ import jax.random as jrn
 from jax import jit, vmap
 
 # System
+import sys
 from os import makedirs
 from os.path import basename, join, dirname
+
+# Logging
+import logging
+from logging import INFO
 
 # Leopold
 from leopold.dataset import (
@@ -40,6 +45,9 @@ from argparse import ArgumentParser, Namespace
 
 # PreattyTables
 from prettytable import PrettyTable
+
+# Typing
+from typing import Union, Optional
 
 # ==== CONSTANTS ==== #
 
@@ -64,6 +72,41 @@ GREETING = f"""
         ░░░░  ░░░░░░                  ░░░░        
         ░░░░  ░░░░                                
 """
+
+# ==== FUNCTIONS ==== #
+
+
+def setup_logger(
+    level: Union[int, str] = INFO,
+    tag: Optional[str] = None,
+    directory: Optional[str] = None,
+):
+    # Get the root logger
+    logger = logging.getLogger("leopold")
+    logger.setLevel(level)
+
+    # Create general formatting
+    formatter = logging.Formatter(
+        "%(asctime)s.%(msecs)03d %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+
+    # Create standard output Handler
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+    # Create file handler
+    if (directory is not None) and (tag is not None):
+        makedirs(directory, exist_ok=True)
+
+        fh = logging.FileHandler(join(directory, tag + ".log"), "w")
+        fh.setFormatter(formatter)
+
+        logger.addHandler(fh)
+
+    return logger
+
 
 # ==== PARSER ==== #
 
@@ -122,6 +165,9 @@ def main():
 
     # ---- SETUP
 
+    # Create Logger
+    logger = setup_logger()
+
     # Retrieve training group
     gtrain = LeopoldCheckpointFile(args.model, "r").get_training()
 
@@ -138,10 +184,14 @@ def main():
     device = jax.devices(args.device)[0]
 
     # If folder is present make sure it exist
-    if args.folder is not None:
-        makedirs(args.folder, exist_ok=True)
+    if args.directory is not None:
+        makedirs(args.directory, exist_ok=True)
+
+    logger.info("LEOPOLD evaluation script")
 
     # ---- LOAD DATA
+    logger.info("Reading datasets from given paths")
+
     data_path = {}
     for data in args.data:
         name = basename(data).split(".")[0]
@@ -155,7 +205,13 @@ def main():
         r_cutoff=gtrain.conf.model["r_cutoff"],
     )
 
+    # Tell the user what we know about this
+    logger.info("Uploaded succesfully the following datasets:")
+    for key, loader in data.items():
+        logger.info(f"\t-{key}: {len(loader)} configurations")
+
     # ---- INITIALIZE MODEL ---- #
+    logger.info("Initializing model")
 
     # Get first data
     first_data = data[next(iter(data_path.keys()))]
@@ -181,6 +237,7 @@ def main():
     params = jax.tree_util.tree_map(lambda x: jax.device_put(x, device), params)
 
     # ---- EVALUATE MODEL ---- #
+    logger.info("Evaluate")
 
     # Prepare RMSE table
     table = PrettyTable(
@@ -251,7 +308,7 @@ def main():
 
     # Print it
     for tline in table.get_string().split("\n"):
-        print(tline)
+        logger.info(tline)
 
 
 if __name__ == "__main__":
