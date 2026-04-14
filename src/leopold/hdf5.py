@@ -16,7 +16,7 @@ from numpy.typing import NDArray
 from ase import Atoms
 
 # H5
-from h5py import File, Group, Dataset
+from h5py import File, Group, Dataset, Empty
 
 # Cuequivariance
 from cuequivariance import IrrepsLayout, Irreps
@@ -100,7 +100,7 @@ def save_dict_to_hdf5(group: Group, state: Any, compression: int = 9) -> None:
                 # If it's a string handle it specially
                 if type(data) is str:
                     group.require_dataset(name, (), f"S{len(data)}")[()] = data
-                elif data is None:
+                elif data is None or isinstance(data, Empty):
                     group.require_dataset(name, None, "f")
                 else:
                     group.require_dataset(name, (), np.asarray(data).dtype)[()] = data
@@ -420,7 +420,7 @@ class LeopoldTrainingGroup:
 
         # NOTE: meaby better output the best loss so far?
         g = self.__observables.require_dataset(
-            "loss", shape=self.__max_epoch, dtype=np.float32
+            "loss", shape=self.__max_epoch, dtype=np.float64
         )
         loss = g[self.step - 1]
 
@@ -478,6 +478,37 @@ class LeopoldTrainingGroup:
             return from_state_dict(params, save_hdf5_to_dict(g))
         else:
             raise KeyError(f"no model named {which} exist!")
+
+    def resize(self, max_epoch: int) -> None:
+        # Check that max_epoch is larger equal than current step
+        if self.step > max_epoch:
+            raise ValueError(
+                "Tried to resize LeopoldTrainingGroup with a size lower tan current step"
+            )
+
+        # Get current configuration and take current max_epoch
+        conf = self.conf
+        conf.training.max_epoch = max_epoch
+
+        # Reshape all the observables
+        for key in self.__observables.keys():
+            # Gather old data
+            data = self.__observables.require_dataset(
+                key, shape=self.__max_epoch, dtype=np.float64
+            )[: self.step]
+
+            # Eliminate current dataset
+            del self.__observables[key]
+
+            # Create new one
+            d = self.__observables.create_dataset(
+                key, shape=(max_epoch,), dtype=data.dtype
+            )
+            d[: self.step] = data
+
+        # Modify the configuration
+        self.conf = conf
+        self.__max_epoch = max_epoch
 
     def attach_dataset(
         self, name: str, data: Union[LeopoldDataLoader, LeopoldDatasetGroup], **kwargs
@@ -564,6 +595,10 @@ class LeopoldCheckpointFile(LeopoldHDF5):
                     g.conf = conf
 
                     return g
+
+            # Before giving it out resize if needed max epoch is changed
+            if last_train.conf.training.max_epoch != conf.training.max_epoch:
+                last_train.resize(conf.training.max_epoch)
 
             # Compatible return last train
             return last_train
