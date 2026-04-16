@@ -43,6 +43,7 @@ from functools import partial
 
 # ASE
 from ase.io import read as ase_read
+from ase.io import write as ase_write
 from ase.units import kB, fs
 from ase.symbols import Symbols
 
@@ -51,6 +52,7 @@ from typing import Union, Optional, Callable
 
 # DATACLASS
 from jax_md import dataclasses
+from dataclasses import asdict
 
 # ==== CONSTANTS ==== #
 
@@ -372,6 +374,21 @@ def main():
     )
     state = dy_init_fn(key, positions, ones_hot, box, mass=mass, dof_mask=dof_mask)
 
+    # If read config has momenta, use them
+    momenta = atoms[0].get_momenta()
+    if np.linalg.norm(momenta) > 0:
+        state = state.set(momentum=jnp.asarray(momenta))
+    temp = temperature(state.momentum, state.dof_mask, state.mass) / kB
+
+    # See if the noose hoover chain is also saved in configuration
+    chain = asdict(state.chain)
+    for key, val in atoms[0].info.items():
+        if "chain_" in key:
+            chain[key.split("chain_")[-1]] = (
+                jnp.asarray(val) if not np.isscalar(val) else val
+            )
+    state = state.set(chain=simulate.NoseHooverChain(**chain))
+
     # Setup HDF5
     os.makedirs(opts.traj_dir, exist_ok=True)
 
@@ -454,6 +471,28 @@ def main():
 
             # Write stuff
             writer(h5state, observables)
+
+    # ---- FINALIZE RUN
+
+    # Write final state so it can be restarted
+    atoms[0].set_scaled_positions(state.position)
+    atoms[0].set_momenta(state.momentum)
+    atoms[0].arrays[gtrain.conf.datasets.labels["vector"]["magmoms"]] = np.asarray(
+        state.ones_hot[:, -1]
+    )
+    atoms[0].arrays["selective_dynamics"] = np.asarray(state.dof_mask)
+
+    # Save also the Nose Hoover thermostat state
+    chain = asdict(state.chain)
+    for key, val in chain.items():
+        atoms[0].info["chain_" + key] = np.asarray(val)
+
+    atoms[0].calc = None
+
+    # Write as extxyz
+    ase_write(os.path.join(opts.traj_dir, tag + "-last.xyz"), atoms, format="extxyz")
+
+    # Greatings
     logger.info("DONE")
 
 
