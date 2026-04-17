@@ -303,7 +303,7 @@ def main():
                 atom.arrays[args.label + "_" + vector_labels["charges"]] = charges[i]
 
             # Descriptor evaluation if wanted
-            if args.descriptor:
+            if args.descriptors:
                 # Evaluate them
                 descriptor = comp_vect_descr(params, *batch.config)
 
