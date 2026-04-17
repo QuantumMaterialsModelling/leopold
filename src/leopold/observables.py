@@ -26,7 +26,9 @@ from jax_md.util import PyTree
 
 # Leopold
 from leopold.nn.cueq_imp import Leopold as leo_cueq
+from leopold.nn.cueq_imp import LeopoldDescriptor as des_cueq
 from leopold.nn.e3nn_imp import Leopold as leo_e3nn
+from leopold.nn.e3nn_imp import LeopoldDescriptor as des_e3nn
 from leopold.dataset import LeopoldDataLoader
 
 # Jraph
@@ -159,6 +161,30 @@ def leopold_model(
         return model.init(key, graph)
 
     return value_and_grad(apply_fn, argnums=1, has_aux=True), init_fn
+
+
+def leopold_descriptor(
+    conf: dict,
+    example_pos: Array,
+    example_elem: Array,
+    example_box: Array,
+):
+    # Get the model type
+    impl = conf.pop("implementation", "e3nn")
+
+    # Construct model and featurizer
+    f = leopold_graph_constructor(example_pos, example_box, conf["r_cutoff"])
+    model = des_e3nn(**conf) if impl == "e3nn" else des_cueq(**conf)
+
+    def apply_fn(param, pos, elem, box):
+        graph = f(pos, elem, box)
+        return model.apply(param, graph)
+
+    def init_fn(key: Array):
+        graph = f(example_pos, example_elem, example_box)
+        return model.init(key, graph)
+
+    return apply_fn, init_fn
 
 
 def evaluate_model(

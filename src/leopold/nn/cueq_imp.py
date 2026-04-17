@@ -404,3 +404,166 @@ class Leopold(nn.Module):
         magchg = scale * magchg + shift
 
         return energy, magchg
+
+
+class LeopoldDescriptor(nn.Module):
+    """Leopold interatomic potential structure
+
+    This is basically a NequIP architecture following the original implementation by [Batzner et al.](nature.com/articles/s41467-022-29939-5)
+    and the reimplementation present inside the [jax-md](https://github.com/jax-md/jax-md) package.
+
+    Attributes:
+        n_elems: number of elements that the model handles
+        n_basis: number of bessel basis to use in the embedding of the edges
+        n_harmo: maximum l of the spherical harmonics to evaluate on the edges
+        n_convo: number of convolutions
+        hidden_irr: irreducible representations used in the convolutional layers
+        r_cutof: cutoff radius of the message passing convolution
+        n_neighbour: average number of neighbour used to average the convolution sum
+        energy_scale: scaling factor for the energy (can be a float or a vector changing for every species)
+        energy_shift: shifting factor for the energy (can be a float or a vector changing for every species)
+        magchg_scale: scaling factor for the magnetizations and charges (can be a float or a vector changing for every species)
+        magchg_shift: shifting factor for the magnetizations and charges (can be a float or a vector changing for every species)
+        radial_mlp_layers: number of layers for the MLP giving the weights for the convolutions
+        radial_mlp_hidden: number of neurons for the MLP giving the weights for the convolutions
+        radial_mlp_activa: activation function for the MLP giving the weights for the convolutions
+        even_gate: activation function to use for equivariant scalar even gate
+        even_act: activation function to use for equivariant vector even gate
+        odd_gate: activation function to use for equivariant scalar odd gate
+        odd_act: activation function to use for equivariant vector odd gate
+    """
+
+    n_elems: int
+    n_basis: int = 8
+    n_harmo: int = 2
+
+    n_convo: int = 2
+    hidden_irr: str = "48x0e + 48x1e"
+    r_cutoff: float = 3.5
+    n_neighbour: float = 1.0
+
+    energy_scale: Array | float = 1.0
+    energy_shift: Array | float = 0.0
+    magchg_scale: Array | float = 1.0
+    magchg_shift: Array | float = 0.0
+
+    radial_mlp_layers: int = 2
+    radial_mlp_hidden: int = 64
+    radial_mlp_activa: str = "raw_swish"
+
+    even_gate: str = "raw_swish"
+    even_act: str = "raw_swish"
+    odd_gate: str = "tanh"
+    odd_act: str = "tanh"
+
+    self_connection: bool = False
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+
+        if jnp.isscalar(self.energy_scale):
+            self.energy_scale = jnp.full((self.n_elems - 1, 1), self.energy_scale)
+
+        if jnp.isscalar(self.energy_shift):
+            self.energy_shift = jnp.full((self.n_elems - 1, 1), self.energy_shift)
+
+        if jnp.isscalar(self.magchg_scale):
+            self.magchg_scale = jnp.full((self.n_elems - 1, 2), self.magchg_scale)
+
+        if jnp.isscalar(self.magchg_shift):
+            self.magchg_shift = jnp.full((self.n_elems - 1, 2), self.magchg_shift)
+
+    @nn.compact
+    def __call__(self, graph: GraphsTuple):
+        # Convert hidden_irr to Irreps
+        target_irr = Irreps("O3", self.hidden_irr)
+
+        # Get the output irreps of the tensor product
+        scalar_irr = target_irr.filter(keep=[cue.O3(0, 1), cue.O3(0, -1)])
+        vector_irr = target_irr.filter(drop=[cue.O3(0, 1), cue.O3(0, -1)])
+
+        hidden_irr = scalar_irr + vector_irr.new_scalars(vector_irr.num_irreps)
+        hidden_irr += vector_irr
+
+        # Get edges
+        dR = graph.edges
+        R = jnp.linalg.norm(dR, axis=-1)
+
+        # Transform edges in RepArray
+        dR = cuex.RepArray(cue.Irreps("O3", "1e"), jnp.asarray(dR), cue.ir_mul)
+
+        # Embed edges
+        dR = cuex.spherical_harmonics([i for i in range(self.n_harmo + 1)], dR)
+        R = BesselEmbedding(self.n_basis, self.r_cutoff - 0.5, self.r_cutoff)(R)
+
+        # Transform nodes in Rep Array
+        nodes = jnp.asarray(graph.nodes)
+        nodes = cuex.RepArray(cue.Irreps("O3", f"{self.n_elems}x0e"), nodes, cue.ir_mul)
+
+        # Perform convolution
+        conv = Linear(target_irr)(nodes)
+        for _ in range(self.n_convo):
+            # NOTE:
+            # original Leopold architecture
+            # e = (
+            #     cue.descriptors.fully_connected_tensor_product(
+            #         conv.irreps, dR.irreps, hidden_irr
+            #     )
+            #     .flatten_coefficient_modes()
+            #     .squeeze_modes()
+            # )
+
+            # NOTE:
+            # testing new more MACE-like architecture
+
+            # Construct the tensor product descriptor
+            e = cue.descriptors.channelwise_tensor_product(
+                conv.irreps, dR.irreps, hidden_irr
+            )
+
+            # Construct the symmetric contraction
+            c = cue.descriptors.symmetric_contraction(
+                Irreps("O3", str(e.outputs[0])), hidden_irr, (1,)
+            )
+
+            # Get dimensions for MLP and non linearities
+            mlp_dims = (self.radial_mlp_hidden,) * self.radial_mlp_layers
+            mlp_dime = mlp_dims + (e.operands[0].dim,)
+            mlp_dimc = mlp_dims + (c.operands[0].dim,)
+            mlp_gate = (self.radial_mlp_activa,) * self.radial_mlp_layers + ("none",)
+
+            # First linear layer
+            conv = Linear(conv.irreps)(conv)
+
+            # Create the self connection
+            if self.self_connection:
+                self_conn = FullyConnectedTensorProduct(
+                    hidden_irr,
+                )(conv, nodes)
+
+            # Get weights and perform convolution
+            edge_feat = cuex.equivariant_polynomial(
+                e, [MLP(mlp_dime, mlp_gate, False)(R), conv[graph.senders], dR]
+            )
+            edge_feat = cuex.equivariant_polynomial(
+                c, [MLP(mlp_dimc, mlp_gate, False)(R), edge_feat]
+            )
+            assert not isinstance(edge_feat, list)
+
+            # Perform a scatter sum averaged beetween neighbours
+            res = jnp.zeros((conv.shape[0], edge_feat.shape[1]))
+            res = res.at[graph.receivers].add(edge_feat.array) / self.n_neighbour
+
+            conv = cuex.RepArray(edge_feat.irreps, res, cue.ir_mul)
+
+            # Second linear layer and self connection
+            conv = Linear(conv.irreps)(conv)
+            if self.self_connection:
+                conv = conv + self_conn
+
+            # Gate the convolution results
+            conv = Gate(self.even_gate, self.even_act, self.odd_gate, self.odd_act)(
+                conv
+            )
+
+        return conv

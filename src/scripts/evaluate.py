@@ -33,7 +33,7 @@ from leopold.dataset import (
     DEFAULT_SCALAR_LABELS,
     DEFAULT_VECTOR_LABELS,
 )
-from leopold.observables import leopold_model
+from leopold.observables import leopold_model, leopold_descriptor
 from leopold.hdf5 import LeopoldCheckpointFile
 from leopold import __version__
 
@@ -151,6 +151,12 @@ def parse_args() -> Namespace:
         help="Accelerator device for the model",
     )
 
+    parser.add_argument(
+        "--descriptors",
+        action="store_true",
+        help="Leopold per atom descriptor will be stored in the evaluation output",
+    )
+
     return parser.parse_args()
 
 
@@ -224,9 +230,16 @@ def main():
         example_data.ones_hot,
         example_data.box,
     )
+    desc_fn, _ = leopold_descriptor(
+        gtrain.model_conf,
+        example_data.positions,
+        example_data.ones_hot,
+        example_data.box,
+    )
 
     # Compile the model
     comp_vect_model = jit(vmap(apply_fn, (None, 0, 0, 0)))
+    comp_vect_descr = jit(vmap(desc_fn, (None, 0, 0, 0)))
 
     # Initialize model
     key = jrn.PRNGKey(gtrain.conf.general.seed)
@@ -288,6 +301,15 @@ def main():
                 atom.arrays[args.label + "_" + vector_labels["forces"]] = -forces[i]
                 atom.arrays[args.label + "_" + vector_labels["magmoms"]] = magmoms[i]
                 atom.arrays[args.label + "_" + vector_labels["charges"]] = charges[i]
+
+            # Descriptor evaluation if wanted
+            if args.descriptor:
+                # Evaluate them
+                descriptor = comp_vect_descr(params, *batch.config)
+
+                # Add them to the atoms
+                for i, atom in enumerate(atoms):
+                    atom.arrays[args.label + "_descriptor"] = descriptor.array[i]
 
             # Extend traj
             traj.extend(atoms)
