@@ -1,0 +1,63 @@
+datasets:
+  # Path to the data to use for training
+  data_paths:
+    train: data/train.xyz
+    validation: data/valid.xyz
+  # Labels used in the xyz files
+  labels:
+    scalar:
+      # In this case the label used for the energies is energy
+      energy: energy
+    vector:
+      # The label for the polaron charges(or magmoms) is instead decomposed_charges(magmoms)
+      charges: decomposed_charges
+      forces: forces
+      magmoms: decomposed_magmoms
+  # Save the data inside the .h5 checkpoint file for a quick restart
+  save_data: true
+general:
+  # Accellerator
+  device: gpu
+  # Name of the directory to store the logs
+  logs_dir: logs
+  logs_lev: 20
+  # Name of the directory to store the checkpoints
+  models_dir: checkpoints
+  # Name used for logs and checkpoints
+  name: LEOPOLD
+  # Random seed for initialization
+  seed: 42
+  # Use Float64 and not standard Float32
+  use_float64: true
+# Model specifics, same as NequIP
+model:
+  even_act: raw_swish
+  even_gate: raw_swish
+  hidden_irr: 48x0e + 48x1e
+  n_basis: 8
+  n_convo: 3
+  n_harmo: 1
+  odd_act: tanh
+  odd_gate: tanh
+  r_cutoff: 5.0
+  radial_mlp_activa: raw_swish
+  radial_mlp_hidden: 64
+  radial_mlp_layers: 2
+  self_connection: false
+training:
+  # Batch sizes
+  batch_size: 1
+  # Weights in the loss
+  charge_weight: 1.0
+  energy_weight: 1.0
+  forces_weight: 1.0
+  magmom_weight: 1.0
+  smagmo_weight: 1.0
+  learning_rate: 0.0005
+  max_epoch: 1000
+  # Max number of epoch without 
+  # improvements in the validaiton loss
+  patience: 200
+  restart: false
+  # If data were saved allow for quick restart of training
+  restart_data: true

@@ -999,3 +999,9 @@ class LeopoldH5MDReader:
     @property
     def n_frames(self) -> int:
         return (self._idxs.stop - self._idxs.start) // self._idxs.step
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.h5md_file.close()

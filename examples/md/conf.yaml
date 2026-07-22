@@ -1,0 +1,27 @@
+# ==== GENERALS ==== #
+
+# Set starting configuration
+start_path: start.xyz
+
+# Set the model to load
+model_path: test_model.h5
+
+# Simulation name
+name: TEST-RUN
+
+# ==== OUTPUT SPECIFICS ==== #
+
+traj_dir: traj
+logs_dir: logs
+
+# log general info
+logs_int: 1
+
+# Write the forces and write at every step
+traj_write_forces: True
+traj_int: 1
+
+# ===== SIMULATION SPECIFICS ==== #
+
+temperature: 300
+max_steps: 1000
