@@ -1,3 +1,7 @@
+<p align="center">
+    <img src="logo.svg" width="200">
+</p>
+
 # LEOPOLD: LEarning Of POLaron Dynamics
 
 ## Overview
